@@ -22,8 +22,7 @@ final class CreateOrder
     ) {
     }
 
-    /** @return array<string, mixed> */
-    public function __invoke(string $sku): array
+    public function __invoke(string $sku): Order
     {
         $product = $this->db->selectOne(
             'SELECT sku, price_minor, currency FROM products WHERE sku = ? AND is_active',
@@ -36,7 +35,7 @@ final class CreateOrder
 
         $id = Order::newId();
 
-        return $this->db->transaction(function (Connection $db) use ($id, $product): array {
+        return $this->db->transaction(function (Connection $db) use ($id, $product): Order {
             $db->execute(
                 'INSERT INTO orders (id, sku, price_minor, currency, status) VALUES (?, ?, ?, ?, ?)',
                 [$id, $product['sku'], $product['price_minor'], $product['currency'], Order::CREATED]
@@ -46,7 +45,7 @@ final class CreateOrder
             // необработанным. Применяем его здесь же, в той же транзакции.
             ($this->applyPaymentEvents)($id);
 
-            return $db->selectOne('SELECT * FROM orders WHERE id = ?', [$id]) ?? [];
+            return Order::fromRow($db->selectOne('SELECT * FROM orders WHERE id = ?', [$id]) ?? []);
         });
     }
 }

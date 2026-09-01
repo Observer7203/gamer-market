@@ -51,9 +51,9 @@ final class HandlePaymentWebhook
                 return 'duplicate';
             }
 
-            $event = $db->selectOne('SELECT * FROM payment_events WHERE event_id = ?', [$payload['event_id']]);
+            $row = $db->selectOne('SELECT * FROM payment_events WHERE event_id = ?', [$payload['event_id']]);
 
-            return $this->applyPaymentEvents->apply($event ?? []);
+            return $this->applyPaymentEvents->apply(PaymentEvent::fromRow($row ?? []));
         });
     }
 }
