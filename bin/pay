@@ -1,0 +1,84 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+/**
+ * Эмулятор платёжной системы: отправляет вебхук по контракту.
+ *
+ * Используется и для ручной проверки, и как генератор конкурентной нагрузки:
+ * --parallel отправляет N одновременных доставок одного события через
+ * curl_multi, что позволяет воспроизвести гонку по одному заказу.
+ *
+ *   php bin/pay --order=ord_01J8Z...
+ *   php bin/pay --order=ord_01J8Z... --parallel=50
+ *   php bin/pay --order=ord_01J8Z... --status=failed
+ *   php bin/pay --order=ord_01J8Z... --event=evt_fixed --parallel=50
+ */
+
+$options = getopt('', ['order:', 'amount::', 'currency::', 'status::', 'event::', 'parallel::', 'url::', 'at::']);
+
+if (!isset($options['order'])) {
+    fwrite(STDERR, "Не указан --order\n");
+    exit(1);
+}
+
+$url = $options['url'] ?? (getenv('APP_URL') ?: 'http://localhost:8080') . '/api/webhooks/payment';
+$parallel = max(1, (int) ($options['parallel'] ?? 1));
+$sharedEvent = $options['event'] ?? null;
+
+$payload = static function (int $i) use ($options, $sharedEvent): string {
+    return json_encode([
+        'event_id'   => $sharedEvent ?? sprintf('evt_%s_%d', bin2hex(random_bytes(4)), $i),
+        'order_id'   => $options['order'],
+        'status'     => $options['status'] ?? 'paid',
+        'amount'     => (int) ($options['amount'] ?? 1990),
+        'currency'   => $options['currency'] ?? 'RUB',
+        'created_at' => $options['at'] ?? gmdate('Y-m-d\TH:i:s\Z'),
+    ], JSON_UNESCAPED_UNICODE);
+};
+
+$multi = curl_multi_init();
+$handles = [];
+
+for ($i = 0; $i < $parallel; $i++) {
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_POST           => true,
+        CURLOPT_POSTFIELDS     => $payload($i),
+        CURLOPT_HTTPHEADER     => ['Content-Type: application/json'],
+        CURLOPT_RETURNTRANSFER => true,
+    ]);
+    curl_multi_add_handle($multi, $ch);
+    $handles[] = $ch;
+}
+
+$startedAt = microtime(true);
+
+do {
+    curl_multi_exec($multi, $running);
+    curl_multi_select($multi, 0.05);
+} while ($running > 0);
+
+$outcomes = [];
+$codes = [];
+
+foreach ($handles as $ch) {
+    $body = json_decode((string) curl_multi_getcontent($ch), true);
+    $codes[(int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE)] = ($codes[(int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE)] ?? 0) + 1;
+    $outcome = is_array($body) ? ($body['outcome'] ?? $body['error']['code'] ?? '?') : '?';
+    $outcomes[$outcome] = ($outcomes[$outcome] ?? 0) + 1;
+    curl_multi_remove_handle($multi, $ch);
+    curl_close($ch);
+}
+
+curl_multi_close($multi);
+
+printf("доставок: %d за %d мс\n", $parallel, (int) round((microtime(true) - $startedAt) * 1000));
+
+foreach ($codes as $code => $n) {
+    printf("  HTTP %d: %d\n", $code, $n);
+}
+foreach ($outcomes as $outcome => $n) {
+    printf("  исход %-16s %d\n", $outcome, $n);
+}

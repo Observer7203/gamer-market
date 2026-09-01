@@ -12,6 +12,12 @@ return [
         'password' => getenv('DB_PASSWORD') ?: 'secret',
     ],
 
+    'provider' => [
+        'url'             => getenv('PROVIDER_URL') ?: 'http://nginx/stubs/provider-a',
+        'connect_timeout' => (float) (getenv('PROVIDER_CONNECT_TIMEOUT') ?: 1),
+        'timeout'         => (float) (getenv('PROVIDER_TIMEOUT') ?: 2),
+    ],
+
     'log' => [
         'path' => dirname(__DIR__) . '/storage/logs/app.log',
     ],

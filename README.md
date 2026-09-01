@@ -29,6 +29,25 @@ docker compose exec app php bin/seed
 curl http://localhost:8080/health
 ```
 
+## Проверка
+
+```bash
+# создать заказ
+curl -X POST http://localhost:8080/api/orders \
+     -H 'Content-Type: application/json' -d '{"sku":"KEY-GTA5"}'
+
+# отправить вебхук оплаты
+docker compose exec app php bin/pay --order=ord_... --amount=1990 \
+     --url=http://nginx/api/webhooks/payment
+
+# забрать код
+curl http://localhost:8080/api/orders/ord_...
+```
+
+`bin/pay` эмулирует платёжную систему. Дополнительные ключи: `--status=failed`,
+`--event=<id>` для повторной доставки того же события, `--parallel=N`
+для одновременной доставки N копий.
+
 ## Структура
 
 ```
@@ -68,7 +87,7 @@ tests/
 ## Дорожная карта
 
 - [x] **0.** Скелет: контейнер, конфиг, роутер, PDO-слой, миграции, docker
-- [ ] **1.** Ядро API: заказ по SKU, чтение заказа, вебхук оплаты, авто-выдача
+- [x] **1.** Ядро API: заказ по SKU, чтение заказа, вебхук оплаты, авто-выдача
 - [ ] **2.** Exactly-once под гонками, тест на 50 параллельных вебхуков
 - [ ] **3.** Два поставщика, таймауты, бэкофф, fallback A→B, обработка `unknown`
 - [ ] **4.** Структурные логи, сверка, healer зависших заказов, журнал денег
