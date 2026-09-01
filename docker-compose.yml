@@ -1,0 +1,65 @@
+services:
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: gamer_market
+      POSTGRES_USER: gamer
+      POSTGRES_PASSWORD: secret
+    ports:
+      - "55432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gamer -d gamer_market"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  # php-fpm: параллельная обработка HTTP, необходимая
+  # для воспроизведения конкурентных сценариев
+  app:
+    build: ./docker/php
+    volumes:
+      - .:/app
+    env_file: .env
+    depends_on:
+      db:
+        condition: service_healthy
+
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "8080:80"
+    volumes:
+      - .:/app
+      - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - app
+
+  # Воркер очереди
+  worker:
+    build: ./docker/php
+    command: php /app/bin/worker
+    volumes:
+      - .:/app
+    env_file: .env
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # Планировщик: восстановление зависших заказов
+  scheduler:
+    build: ./docker/php
+    command: sh -c "while true; do php /app/bin/heal; sleep 60; done"
+    volumes:
+      - .:/app
+    env_file: .env
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:

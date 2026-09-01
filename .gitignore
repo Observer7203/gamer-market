@@ -1,0 +1,13 @@
+/vendor/
+/storage/logs/*.log
+.env
+.phpunit.result.cache
+.DS_Store
+.idea/
+
+# Рабочие материалы — остаются на диске, в репозиторий не идут
+/docs/TZ.md
+/docs/QA.md
+/docs/QA.txt
+/docs/LOAD.md
+/bin/md-txt
