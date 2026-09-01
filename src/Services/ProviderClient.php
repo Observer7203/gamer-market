@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace App\Domain\Delivery;
+namespace App\Services;
 
 use App\Support\Logger;
 

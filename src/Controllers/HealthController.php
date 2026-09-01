@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace App\Http\Controller;
+namespace App\Controllers;
 
 use App\Database\Connection;
 use App\Http\Request;

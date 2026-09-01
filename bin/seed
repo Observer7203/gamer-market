@@ -4,7 +4,7 @@
 declare(strict_types=1);
 
 use App\Database\Connection;
-use App\Domain\Money;
+use App\Support\Money;
 use App\Support\Container;
 
 /**

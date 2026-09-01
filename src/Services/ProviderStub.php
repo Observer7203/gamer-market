@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace App\Stub;
+namespace App\Services;
 
 use App\Database\Connection;
 

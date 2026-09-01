@@ -5,7 +5,7 @@ declare(strict_types=1);
 use App\Database\Connection;
 use App\Database\Migrator;
 use App\Database\PostgresConnection;
-use App\Domain\Delivery\ProviderClient;
+use App\Services\ProviderClient;
 use App\Http\Router;
 use App\Support\Container;
 use App\Support\Logger;

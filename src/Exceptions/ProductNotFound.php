@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace App\Domain\Ordering;
+namespace App\Exceptions;
 
 use RuntimeException;
 

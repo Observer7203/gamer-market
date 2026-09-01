@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace App\Queue;
 
-use App\Domain\Delivery\DeliverOrder;
+use App\Services\DeliverOrder;
 use App\Support\Logger;
 use Throwable;
 

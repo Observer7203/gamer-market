@@ -2,16 +2,16 @@
 
 declare(strict_types=1);
 
-namespace App\Http\Controller;
+namespace App\Controllers;
 
 use App\Database\Connection;
-use App\Domain\Money;
-use App\Domain\Ordering\CreateOrder;
-use App\Domain\Ordering\ProductNotFound;
+use App\Exceptions\ProductNotFound;
 use App\Http\Request;
 use App\Http\Response;
 use App\Models\Delivery;
 use App\Models\Order;
+use App\Services\CreateOrder;
+use App\Support\Money;
 
 final class OrderController
 {
