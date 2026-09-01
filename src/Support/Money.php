@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace App\Domain;
+namespace App\Support;
 
 /**
  * Перевод между единицами контракта и внутренним представлением.

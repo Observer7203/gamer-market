@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace App\Domain\Delivery;
+namespace App\Services;
 
 use App\Database\Connection;
 use App\Models\Delivery;

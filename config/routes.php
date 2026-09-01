@@ -2,11 +2,11 @@
 
 declare(strict_types=1);
 
-use App\Http\Controller\HealthController;
-use App\Http\Controller\OrderController;
-use App\Http\Controller\PaymentWebhookController;
+use App\Controllers\HealthController;
+use App\Controllers\OrderController;
+use App\Controllers\PaymentWebhookController;
 use App\Http\Router;
-use App\Stub\ProviderStubController;
+use App\Controllers\ProviderStubController;
 
 /**
  * Карта маршрутов: полный перечень адресов, доступных извне.

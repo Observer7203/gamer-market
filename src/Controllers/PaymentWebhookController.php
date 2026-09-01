@@ -2,11 +2,11 @@
 
 declare(strict_types=1);
 
-namespace App\Http\Controller;
+namespace App\Controllers;
 
-use App\Domain\Payment\HandlePaymentWebhook;
 use App\Http\Request;
 use App\Http\Response;
+use App\Services\HandlePaymentWebhook;
 use App\Support\Logger;
 use Throwable;
 

@@ -59,13 +59,14 @@ docs/           архитектура, нагрузочный профиль
 migrations/     .sql, применяются по порядку имён, каждая в транзакции
 public/         index.php — единственная точка входа HTTP
 src/
-  Support/      контейнер, структурный логгер
-  Database/     Connection (интерфейс) + PostgresConnection + Migrator
-  Http/         Request, Response, Router, Dispatcher, тонкие контроллеры
-  Models/       модели: Order, PaymentEvent, Delivery
-  Domain/       бизнес-логика: Ordering, Payment, Delivery
+  Controllers/  тонкие: разобрать запрос, вызвать сервис, отдать HTTP
+  Models/       Order, PaymentEvent, Delivery — состояние и правила
+  Services/     бизнес-логика: создание заказа, приём вебхука, выдача
+  Database/     Connection (контракт) + PostgresConnection + Migrator
+  Http/         Request, Response, Router, Dispatcher
   Queue/        очередь на таблице и воркер
-  Stub/         заглушки поставщиков A и B
+  Support/      контейнер, логгер, перевод денежных единиц
+  Exceptions/
 tests/
 ```
 

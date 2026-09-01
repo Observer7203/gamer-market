@@ -2,10 +2,10 @@
 
 declare(strict_types=1);
 
-namespace App\Domain\Ordering;
+namespace App\Services;
 
 use App\Database\Connection;
-use App\Domain\Payment\ApplyPaymentEvents;
+use App\Exceptions\ProductNotFound;
 use App\Models\Order;
 
 /**

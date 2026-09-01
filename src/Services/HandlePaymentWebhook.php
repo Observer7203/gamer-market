@@ -2,11 +2,11 @@
 
 declare(strict_types=1);
 
-namespace App\Domain\Payment;
+namespace App\Services;
 
 use App\Database\Connection;
-use App\Domain\Money;
 use App\Models\PaymentEvent;
+use App\Support\Money;
 
 /**
  * Обработчик вебхука платёжной системы.
