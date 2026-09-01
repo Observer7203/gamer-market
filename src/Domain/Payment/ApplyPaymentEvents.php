@@ -5,7 +5,8 @@ declare(strict_types=1);
 namespace App\Domain\Payment;
 
 use App\Database\Connection;
-use App\Domain\Ordering\Order;
+use App\Models\Order;
+use App\Models\PaymentEvent;
 use App\Queue\Queue;
 use App\Support\Logger;
 

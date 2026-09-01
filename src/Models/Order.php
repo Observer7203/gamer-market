@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace App\Domain\Ordering;
+namespace App\Models;
 
 /**
  * Заказ: состояние и правила его изменения.

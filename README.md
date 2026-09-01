@@ -62,7 +62,8 @@ src/
   Support/      контейнер, структурный логгер
   Database/     Connection (интерфейс) + PostgresConnection + Migrator
   Http/         Request, Response, Router, Dispatcher, тонкие контроллеры
-  Domain/       бизнес-логика: Catalog, Ordering, Payment, Delivery, Ledger
+  Models/       модели: Order, PaymentEvent, Delivery
+  Domain/       бизнес-логика: Ordering, Payment, Delivery
   Queue/        очередь на таблице и воркер
   Stub/         заглушки поставщиков A и B
 tests/

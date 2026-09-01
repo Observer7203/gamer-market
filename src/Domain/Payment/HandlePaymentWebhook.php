@@ -6,6 +6,7 @@ namespace App\Domain\Payment;
 
 use App\Database\Connection;
 use App\Domain\Money;
+use App\Models\PaymentEvent;
 
 /**
  * Обработчик вебхука платёжной системы.

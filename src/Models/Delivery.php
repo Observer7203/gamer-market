@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace App\Domain\Delivery;
+namespace App\Models;
 
 /**
  * Выдача товара по заказу. Одна на заказ — за это отвечает первичный ключ
