@@ -1,0 +1,21 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+use App\Database\Migrator;
+use App\Support\Container;
+
+/** @var Container $container */
+$container = require dirname(__DIR__) . '/src/bootstrap.php';
+
+$applied = $container->get(Migrator::class)->run();
+
+if ($applied === []) {
+    echo "Новых миграций нет.\n";
+    exit(0);
+}
+
+foreach ($applied as $name) {
+    echo "применена: $name\n";
+}
