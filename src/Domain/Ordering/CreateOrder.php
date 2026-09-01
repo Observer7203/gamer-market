@@ -6,6 +6,7 @@ namespace App\Domain\Ordering;
 
 use App\Database\Connection;
 use App\Domain\Payment\ApplyPaymentEvents;
+use App\Models\Order;
 
 /**
  * Создание заказа по артикулу.

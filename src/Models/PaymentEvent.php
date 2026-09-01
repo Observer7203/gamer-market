@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace App\Domain\Payment;
+namespace App\Models;
 
 /**
  * Событие платёжной системы.

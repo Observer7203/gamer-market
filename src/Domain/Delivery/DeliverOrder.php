@@ -5,7 +5,8 @@ declare(strict_types=1);
 namespace App\Domain\Delivery;
 
 use App\Database\Connection;
-use App\Domain\Ordering\Order;
+use App\Models\Delivery;
+use App\Models\Order;
 use App\Support\Logger;
 
 /**

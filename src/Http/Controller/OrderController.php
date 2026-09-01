@@ -5,13 +5,13 @@ declare(strict_types=1);
 namespace App\Http\Controller;
 
 use App\Database\Connection;
-use App\Domain\Delivery\Delivery;
 use App\Domain\Money;
 use App\Domain\Ordering\CreateOrder;
-use App\Domain\Ordering\Order;
 use App\Domain\Ordering\ProductNotFound;
 use App\Http\Request;
 use App\Http\Response;
+use App\Models\Delivery;
+use App\Models\Order;
 
 final class OrderController
 {
