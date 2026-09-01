@@ -34,4 +34,14 @@ final class Request
             raw: $raw,
         );
     }
+
+    public function input(string $key, mixed $default = null): mixed
+    {
+        return $this->json[$key] ?? $this->query[$key] ?? $default;
+    }
+
+    public function attribute(string $key): string
+    {
+        return $this->attributes[$key] ?? '';
+    }
 }

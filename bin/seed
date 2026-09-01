@@ -1,0 +1,51 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+use App\Database\Connection;
+use App\Support\Container;
+
+/**
+ * Загрузка каталога и склада заглушки поставщика.
+ * Повторный запуск не создаёт дубликатов.
+ */
+
+/** @var Container $container */
+$container = require dirname(__DIR__) . '/src/bootstrap.php';
+$db = $container->get(Connection::class);
+$root = dirname(__DIR__);
+
+$catalog = json_decode((string) file_get_contents($root . '/data/products.json'), true);
+$keys = json_decode((string) file_get_contents($root . '/data/keys.json'), true)['keys'];
+
+$db->transaction(function (Connection $db) use ($catalog, $keys): void {
+    $rank = count($catalog['products']);
+
+    foreach ($catalog['products'] as $product) {
+        $db->execute(
+            'INSERT INTO products (sku, name, type, price_minor, currency, sort_rank)
+                  VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT (sku) DO NOTHING',
+            [$product['sku'], $product['name'], $product['type'], $product['price'], $product['currency'], $rank--]
+        );
+    }
+
+    // Коды распределяются по артикулам по кругу: у каждого товара
+    // оказывается несколько экземпляров на складе поставщика.
+    $skus = array_column($catalog['products'], 'sku');
+
+    foreach ($keys as $i => $code) {
+        $db->execute(
+            'INSERT INTO provider_stock (provider, sku, code) VALUES (?, ?, ?)
+             ON CONFLICT (provider, code) DO NOTHING',
+            ['a', $skus[$i % count($skus)], $code]
+        );
+    }
+});
+
+printf(
+    "каталог: %d позиций, склад поставщика a: %d кодов\n",
+    (int) $db->selectOne('SELECT count(*) AS n FROM products')['n'],
+    (int) $db->selectOne('SELECT count(*) AS n FROM provider_stock')['n'],
+);

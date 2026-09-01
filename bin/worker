@@ -1,0 +1,12 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+use App\Queue\Worker;
+use App\Support\Container;
+
+/** @var Container $container */
+$container = require dirname(__DIR__) . '/src/bootstrap.php';
+
+$container->get(Worker::class)->run();

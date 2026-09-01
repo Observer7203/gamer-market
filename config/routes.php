@@ -3,7 +3,10 @@
 declare(strict_types=1);
 
 use App\Http\Controller\HealthController;
+use App\Http\Controller\OrderController;
+use App\Http\Controller\PaymentWebhookController;
 use App\Http\Router;
+use App\Stub\ProviderStubController;
 
 /**
  * Карта маршрутов: полный перечень адресов, доступных извне.
@@ -12,15 +15,12 @@ return static function (Router $router): void {
 
     $router->get('/health', [HealthController::class, 'show']);
 
-    // Ядро API
-    // POST /api/orders                создание заказа по SKU
-    // GET  /api/orders/{id}           состояние заказа и выданный код
-    // POST /api/webhooks/payment      вебхук платёжной системы
+    $router->post('/api/orders', [OrderController::class, 'store']);
+    $router->get('/api/orders/{id}', [OrderController::class, 'show']);
 
-    // Заглушки поставщиков
-    // POST /stubs/provider-a/issue
-    // POST /stubs/provider-b/issue
+    $router->post('/api/webhooks/payment', [PaymentWebhookController::class, 'store']);
 
-    // Сверка
-    // GET  /api/admin/reconciliation
+    // Заглушка поставщика: отдельный сервис, размещённый в том же приложении
+    // ради простоты запуска.
+    $router->post('/stubs/provider-{provider}/issue', [ProviderStubController::class, 'issue']);
 };

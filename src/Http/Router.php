@@ -20,6 +20,12 @@ final class Router
     }
 
     /** @param array{0: class-string, 1: string} $handler */
+    public function post(string $path, array $handler): void
+    {
+        $this->add('POST', $path, $handler);
+    }
+
+    /** @param array{0: class-string, 1: string} $handler */
     private function add(string $method, string $path, array $handler): void
     {
         $keys = [];

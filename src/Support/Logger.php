@@ -20,11 +20,23 @@ final class Logger
     }
 
     /** @param array<string, mixed> $context */
+    public function info(string $event, array $context = []): void
+    {
+        $this->write('info', $event, $context);
+    }
+
+    /** @param array<string, mixed> $context */
     public function error(string $event, array $context = []): void
+    {
+        $this->write('error', $event, $context);
+    }
+
+    /** @param array<string, mixed> $context */
+    private function write(string $level, string $event, array $context): void
     {
         $record = [
             'ts'    => (new DateTimeImmutable('now', new DateTimeZone('UTC')))->format('Y-m-d\TH:i:s.vP'),
-            'level' => 'error',
+            'level' => $level,
             'event' => $event,
             'pid'   => getmypid(),
             ...$context,
