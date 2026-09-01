@@ -5,11 +5,10 @@ declare(strict_types=1);
 namespace App\Domain\Ordering;
 
 /**
- * Правила жизненного цикла заказа: перечень состояний, разрешённые переходы,
- * генерация идентификатора.
+ * Заказ: состояние и правила его изменения.
  *
  * Переходы заданы белым списком — разрешено только перечисленное. Проверка
- * живёт здесь, а не в контроллере или сервисе: состоянием владеет заказ.
+ * принадлежит объекту, а не контроллеру или сервису: состоянием владеет заказ.
  */
 final class Order
 {
@@ -38,14 +37,46 @@ final class Order
 
     private const FINAL = [self::DELIVERED, self::PAYMENT_FAILED];
 
-    public static function canTransition(string $from, string $to): bool
-    {
-        return in_array($to, self::TRANSITIONS[$from] ?? [], true);
+    private function __construct(
+        public readonly string $id,
+        public readonly string $sku,
+        public readonly int $priceMinor,
+        public readonly string $currency,
+        public readonly string $status,
+        public readonly string $createdAt,
+        public readonly ?string $paidAt,
+        public readonly ?string $deliveredAt,
+    ) {
     }
 
-    public static function isFinal(string $status): bool
+    /** @param array<string, mixed> $row */
+    public static function fromRow(array $row): self
     {
-        return in_array($status, self::FINAL, true);
+        return new self(
+            (string) $row['id'],
+            (string) $row['sku'],
+            (int) $row['price_minor'],
+            (string) $row['currency'],
+            (string) $row['status'],
+            (string) $row['created_at'],
+            isset($row['paid_at']) ? (string) $row['paid_at'] : null,
+            isset($row['delivered_at']) ? (string) $row['delivered_at'] : null,
+        );
+    }
+
+    public function canTransitionTo(string $status): bool
+    {
+        return in_array($status, self::TRANSITIONS[$this->status] ?? [], true);
+    }
+
+    public function isFinal(): bool
+    {
+        return in_array($this->status, self::FINAL, true);
+    }
+
+    public function matches(int $amountMinor, string $currency): bool
+    {
+        return $this->priceMinor === $amountMinor && $this->currency === $currency;
     }
 
     /**

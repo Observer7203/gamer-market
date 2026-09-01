@@ -1,0 +1,317 @@
+ПРОВЕРКА ЭТАПА 1
+Команды для ручного прогона сценариев ядра API
+------------------------------------------------------------------------------
+
+Все команды выполняются из корня проекта. Порт приложения — 8080.
+Внутри контейнеров приложение доступно по адресу http://nginx.
+
+
+==============================================================================
+0. ПОДГОТОВКА
+------------------------------------------------------------------------------
+
+    cp .env.example .env
+    docker compose up -d --build
+    docker compose exec app composer install
+    docker compose exec app php bin/migrate
+    docker compose exec app php bin/seed
+
+Ожидается:
+
+    применена: 001_core.sql
+    каталог: 12 позиций, склад поставщика a: 50 кодов
+
+Проверка готовности:
+
+    curl -s http://localhost:8080/health
+
+    {"status":"ok","database":"up","php":"8.3.33"}
+
+При остановленной базе тот же адрес отдаёт 503 и "database":"down".
+
+Полная пересборка с чистой базой:
+
+    docker compose down -v && docker compose up -d
+    docker compose exec app php bin/migrate && docker compose exec app php bin/seed
+
+
+==============================================================================
+1. СКВОЗНОЙ ПУТЬ: ЗАКАЗ, ОПЛАТА, ВЫДАЧА
+------------------------------------------------------------------------------
+
+Создание заказа:
+
+    curl -s -X POST http://localhost:8080/api/orders \
+         -H 'Content-Type: application/json' \
+         -d '{"sku":"KEY-GTA5"}'
+
+    {
+        "order_id": "ord_01M1EW079XJP41BT14ZE3F8WKP",
+        "sku": "KEY-GTA5",
+        "amount": 1990,
+        "currency": "RUB",
+        "status": "created"
+    }
+
+Сумму присылает сервер, а не клиент: поле amount в запросе игнорируется.
+
+Сохранить идентификатор в переменную:
+
+    ID=$(curl -s -X POST http://localhost:8080/api/orders \
+         -H 'Content-Type: application/json' -d '{"sku":"KEY-GTA5"}' \
+         | php -r 'echo json_decode(stream_get_contents(STDIN),true)["order_id"];')
+
+Оплата — эмулятор платёжной системы:
+
+    docker compose exec app php bin/pay --order=$ID --amount=1990 \
+        --url=http://nginx/api/webhooks/payment
+
+    доставок: 1 за 20 мс
+      HTTP 200: 1
+      исход applied          1
+
+Чтение заказа. Сразу после вебхука статус paid, блока delivery ещё нет;
+через доли секунды воркер доводит заказ до delivered:
+
+    curl -s http://localhost:8080/api/orders/$ID
+
+    {
+        "order_id": "ord_01M1EW079XJP41BT14ZE3F8WKP",
+        "sku": "KEY-GTA5",
+        "amount": 1990,
+        "currency": "RUB",
+        "status": "delivered",
+        "delivery": {
+            "code": "0K9E-P1FR-BY1U",
+            "delivered_at": "..."
+        }
+    }
+
+Наблюдать переход состояний:
+
+    watch -n 0.3 "curl -s http://localhost:8080/api/orders/$ID | grep status"
+
+
+==============================================================================
+2. ПОВТОРНАЯ ДОСТАВКА СОБЫТИЯ
+------------------------------------------------------------------------------
+
+Одно и то же событие доставляется дважды. Второй раз ничего не меняет.
+
+    docker compose exec app php bin/pay --order=$ID --amount=1990 \
+        --event=evt_fixed --url=http://nginx/api/webhooks/payment
+
+    docker compose exec app php bin/pay --order=$ID --amount=1990 \
+        --event=evt_fixed --url=http://nginx/api/webhooks/payment
+
+Ожидается: первый вызов даёт исход по состоянию заказа, второй — duplicate.
+
+    исход ignored          1
+    исход duplicate        1
+
+Новое событие по уже выданному заказу:
+
+    docker compose exec app php bin/pay --order=$ID --amount=1990 \
+        --url=http://nginx/api/webhooks/payment
+
+    исход ignored          1
+
+Оба случая отвечают 200: ошибка заставила бы платёжную систему
+повторять доставку бесконечно.
+
+
+==============================================================================
+3. НЕСООТВЕТСТВИЕ СУММЫ
+------------------------------------------------------------------------------
+
+    docker compose exec app php bin/pay --order=$ID --amount=500 \
+        --url=http://nginx/api/webhooks/payment
+
+    HTTP 200: 1
+    исход amount_mismatch  1
+
+Событие принято и помечено; статус заказа не меняется. Ответ успешный:
+повторная доставка сумму не исправит, разбирается через сверку.
+
+
+==============================================================================
+4. СОБЫТИЕ ПО НЕСУЩЕСТВУЮЩЕМУ ЗАКАЗУ
+------------------------------------------------------------------------------
+
+    docker compose exec app php bin/pay --order=ord_NETAKOGO --amount=1990 \
+        --url=http://nginx/api/webhooks/payment
+
+    HTTP 200: 1
+    исход order_not_found  1
+
+Событие сохранено и ожидает применения:
+
+    docker compose exec db psql -U gamer -d gamer_market -c \
+      "SELECT event_id, order_id, outcome, processed_at IS NULL AS ждёт
+         FROM payment_events WHERE order_id = 'ord_NETAKOGO';"
+
+При появлении заказа с этим идентификатором событие применяется
+в той же транзакции, что и его создание.
+
+
+==============================================================================
+5. ОШИБКИ ВВОДА
+------------------------------------------------------------------------------
+
+Неизвестный артикул:
+
+    curl -s -X POST http://localhost:8080/api/orders \
+         -H 'Content-Type: application/json' -d '{"sku":"NO-SUCH-SKU"}'
+
+    404  {"error":{"code":"product_not_found", ...}}
+
+Несуществующий заказ:
+
+    curl -s http://localhost:8080/api/orders/ord_NETAKOGO
+
+    404  {"error":{"code":"order_not_found", ...}}
+
+Сумма строкой вместо числа:
+
+    curl -s -X POST http://localhost:8080/api/webhooks/payment \
+         -H 'Content-Type: application/json' \
+         -d '{"event_id":"e1","order_id":"o1","status":"paid",
+              "amount":"1990","currency":"RUB","created_at":"2025-01-01T12:00:00Z"}'
+
+    400  Поле amount обязательно и должно быть положительным целым числом
+
+Недопустимый статус:
+
+    ... "status":"refunded" ...
+    400  Поле status допускает значения paid и failed
+
+Ошибка формата даёт 400. Несоответствие данных заказу даёт 200 и попадает
+в сверку — это разные классы проблем.
+
+
+==============================================================================
+6. ИСЧЕРПАНИЕ ОСТАТКА И ВОССТАНОВЛЕНИЕ
+------------------------------------------------------------------------------
+
+У артикула KEY-EFT на складе четыре кода. Пять оплаченных заказов:
+
+    for i in 1 2 3 4 5; do
+      ID=$(curl -s -X POST http://localhost:8080/api/orders \
+           -H 'Content-Type: application/json' -d '{"sku":"KEY-EFT"}' \
+           | php -r 'echo json_decode(stream_get_contents(STDIN),true)["order_id"];')
+      docker compose exec -T app php bin/pay --order=$ID --amount=3490 \
+           --url=http://nginx/api/webhooks/payment > /dev/null
+    done
+
+Результат через несколько секунд:
+
+    docker compose exec db psql -U gamer -d gamer_market -c \
+      "SELECT o.id, o.status, coalesce(d.code,'—') AS code
+         FROM orders o LEFT JOIN deliveries d ON d.order_id = o.id
+        WHERE o.sku = 'KEY-EFT' ORDER BY o.created_at;"
+
+    четыре заказа delivered с разными кодами
+    пятый        out_of_stock
+
+Приложение остаётся работоспособным:
+
+    curl -s http://localhost:8080/health        ->  status: ok
+
+Задача возвращена в очередь с отсрочкой:
+
+    docker compose exec db psql -U gamer -d gamer_market -c \
+      "SELECT status, attempts, last_error, run_at > now() AS отложена
+         FROM jobs WHERE status <> 'done' ORDER BY id DESC LIMIT 1;"
+
+    pending | 1 | out_of_stock | t
+
+Восстановление — пополнить склад и дождаться повтора (до 60 секунд):
+
+    docker compose exec db psql -U gamer -d gamer_market -c \
+      "INSERT INTO provider_stock (provider, sku, code)
+       VALUES ('a','KEY-EFT','RSTK-0001-NEW1');"
+
+Пятый заказ доходит до delivered со второй попытки, повторной выдачи
+по остальным заказам не происходит.
+
+
+==============================================================================
+7. ПРОВЕРКА ИНВАРИАНТОВ
+------------------------------------------------------------------------------
+
+    docker compose exec db psql -U gamer -d gamer_market -c "
+    SELECT 'заказов'        AS метрика, count(*)::text FROM orders
+    UNION ALL SELECT 'выдач',           count(*)::text FROM deliveries
+    UNION ALL SELECT 'выдач delivered', count(*)::text FROM deliveries WHERE status='delivered'
+    UNION ALL SELECT 'кодов выдано',    count(*)::text FROM provider_stock WHERE request_id IS NOT NULL
+    UNION ALL SELECT 'кодов дважды',
+      (SELECT count(*) FROM (SELECT code FROM provider_stock
+        WHERE request_id IS NOT NULL GROUP BY code HAVING count(*) > 1) x)::text;"
+
+Обязательные соотношения:
+
+    кодов дважды     =  0
+    выдач            <= заказов
+    кодов выдано     >= выдач delivered
+
+Последнее — неравенство, а не равенство: прямые обращения к заглушке
+из раздела 9 расходуют коды, не создавая выдач.
+
+Ни один заказ не может иметь двух выдач: ограничение первичного ключа
+на deliveries.order_id.
+
+Исходы обработки событий:
+
+    docker compose exec db psql -U gamer -d gamer_market -c \
+      "SELECT outcome, count(*) FROM payment_events GROUP BY outcome ORDER BY 2 DESC;"
+
+
+==============================================================================
+8. ЛОГИ
+------------------------------------------------------------------------------
+
+Одна строка — один JSON-объект:
+
+    docker compose exec app tail -20 storage/logs/app.log
+
+История конкретного заказа:
+
+    docker compose exec app grep $ID storage/logs/app.log
+
+События: order_delivered, payment_event_applied, provider_request,
+job_rescheduled, delivery_failed, unhandled_exception.
+
+Журнал воркера:
+
+    docker compose logs worker --tail=30
+
+
+==============================================================================
+9. ПРЯМОЕ ОБРАЩЕНИЕ К ЗАГЛУШКЕ ПОСТАВЩИКА
+------------------------------------------------------------------------------
+
+Заглушка доступна отдельно от основного потока:
+
+    docker compose exec app curl -s -X POST http://nginx/stubs/provider-a/issue \
+      -H 'Content-Type: application/json' \
+      -d '{"request_id":"req_manual_1","sku":"KEY-GTA5","order_id":"ord_manual"}'
+
+    {"status":"ok","request_id":"req_manual_1","code":"..."}
+
+Повтор с тем же request_id возвращает тот же код:
+
+    (повторить ту же команду — code совпадает)
+
+Запрос по артикулу с пустым остатком:
+
+    409  {"status":"error","reason":"out_of_stock"}
+
+
+==============================================================================
+10. ПОЛНЫЙ СБРОС
+------------------------------------------------------------------------------
+
+    docker compose down -v
+    docker compose up -d
+    docker compose exec app php bin/migrate
+    docker compose exec app php bin/seed

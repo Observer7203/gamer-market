@@ -53,9 +53,15 @@ final class DeliverOrder
     private function claim(string $orderId): ?array
     {
         return $this->db->transaction(function (Connection $db) use ($orderId): ?array {
-            $order = $db->selectOne('SELECT * FROM orders WHERE id = ? FOR UPDATE', [$orderId]);
+            $row = $db->selectOne('SELECT * FROM orders WHERE id = ? FOR UPDATE', [$orderId]);
 
-            if ($order === null || Order::isFinal((string) $order['status'])) {
+            if ($row === null) {
+                return null;
+            }
+
+            $order = Order::fromRow($row);
+
+            if ($order->isFinal()) {
                 return null;
             }
 
@@ -64,29 +70,31 @@ final class DeliverOrder
             $requestId = 'req_' . $orderId . '_' . self::PROVIDER;
 
             $db->execute(
-                'INSERT INTO deliveries (order_id, status) VALUES (?, \'pending\')
+                'INSERT INTO deliveries (order_id, status) VALUES (?, ?)
                  ON CONFLICT (order_id) DO NOTHING',
-                [$orderId]
+                [$orderId, Delivery::PENDING]
             );
 
             $taken = $db->execute(
                 'UPDATE deliveries
-                    SET status = \'in_flight\', attempts = attempts + 1,
+                    SET status = ?, attempts = attempts + 1,
                         provider = ?, request_id = ?
-                  WHERE order_id = ?
-                    AND status IN (\'pending\', \'failed\', \'out_of_stock\')',
-                [self::PROVIDER, $requestId, $orderId]
+                  WHERE order_id = ? AND status IN (?, ?, ?)',
+                [
+                    Delivery::IN_FLIGHT, self::PROVIDER, $requestId, $orderId,
+                    Delivery::PENDING, Delivery::FAILED, Delivery::OUT_OF_STOCK,
+                ]
             );
 
             if ($taken === 0) {
                 return null;
             }
 
-            if (Order::canTransition((string) $order['status'], Order::DELIVERING)) {
+            if ($order->canTransitionTo(Order::DELIVERING)) {
                 $db->execute('UPDATE orders SET status = ? WHERE id = ?', [Order::DELIVERING, $orderId]);
             }
 
-            return ['sku' => (string) $order['sku'], 'request_id' => $requestId];
+            return ['sku' => $order->sku, 'request_id' => $requestId];
         });
     }
 
@@ -96,9 +104,9 @@ final class DeliverOrder
         return $this->db->transaction(function (Connection $db) use ($orderId, $requestId, $response): string {
             if ($response['outcome'] === 'ok') {
                 $db->execute(
-                    'UPDATE deliveries SET status = \'delivered\', code = ?, last_error = NULL,
+                    'UPDATE deliveries SET status = ?, code = ?, last_error = NULL,
                             delivered_at = now() WHERE order_id = ?',
-                    [$response['code'], $orderId]
+                    [Delivery::DELIVERED, $response['code'], $orderId]
                 );
                 $db->execute(
                     'UPDATE orders SET status = ?, delivered_at = now() WHERE id = ?',
@@ -115,7 +123,7 @@ final class DeliverOrder
 
             // Пустой остаток — восстановимое состояние, а не отказ приложения.
             $outOfStock = ($response['reason'] ?? null) === 'out_of_stock';
-            $deliveryStatus = $outOfStock ? 'out_of_stock' : 'failed';
+            $deliveryStatus = $outOfStock ? Delivery::OUT_OF_STOCK : Delivery::FAILED;
             $orderStatus = $outOfStock ? Order::OUT_OF_STOCK : Order::DELIVERY_FAILED;
 
             $db->execute(
