@@ -7,6 +7,7 @@ namespace App\Http\Controller;
 use App\Database\Connection;
 use App\Domain\Ordering\CreateOrder;
 use App\Domain\Ordering\ProductNotFound;
+use App\Domain\Money;
 use App\Http\Request;
 use App\Http\Response;
 
@@ -55,7 +56,7 @@ final class OrderController
         $body = [
             'order_id'   => $order['id'],
             'sku'        => $order['sku'],
-            'amount'     => (int) $order['price'],
+            'amount'     => Money::toContract((int) $order['price_minor']),
             'currency'   => $order['currency'],
             'status'     => $order['status'],
             'created_at' => $order['created_at'],
