@@ -1,0 +1,971 @@
+<title>Архитектура ядра выдачи</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&display=swap">
+
+<style>
+:root{
+  --bg:#EFF3F2;
+  --surface:#FFFFFF;
+  --surface-2:#E1E8E7;
+  --ink:#131E1D;
+  --ink-soft:#485957;
+  --ink-faint:#7A8B89;
+  --rule:#CFD9D8;
+  --accent:#0D6E78;
+  --accent-soft:#D8EAEC;
+  --ok:#2C7A57;
+  --warn:#A9701A;
+  --bad:#AE3F3F;
+  --flow:#4C6488;
+
+  --display:'Archivo','Helvetica Neue',Arial,sans-serif;
+  --body:'Source Serif 4',Georgia,'Times New Roman',serif;
+  --mono:'JetBrains Mono','SF Mono',Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --bg:#0E1514;
+    --surface:#151F1E;
+    --surface-2:#1D2827;
+    --ink:#E3EAE9;
+    --ink-soft:#A0B0AE;
+    --ink-faint:#6E807E;
+    --rule:#2A3736;
+    --accent:#54C6CF;
+    --accent-soft:#123236;
+    --ok:#5CBB8C;
+    --warn:#D6A34E;
+    --bad:#E08484;
+    --flow:#8DA6C8;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0E1514;
+  --surface:#151F1E;
+  --surface-2:#1D2827;
+  --ink:#E3EAE9;
+  --ink-soft:#A0B0AE;
+  --ink-faint:#6E807E;
+  --rule:#2A3736;
+  --accent:#54C6CF;
+  --accent-soft:#123236;
+  --ok:#5CBB8C;
+  --warn:#D6A34E;
+  --bad:#E08484;
+  --flow:#8DA6C8;
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--bg);
+  color:var(--ink);
+  font-family:var(--body);
+  font-size:17px;
+  line-height:1.62;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1120px;margin:0 auto;padding:0 28px 96px}
+.prose{max-width:64ch}
+
+/* ---------- шапка ---------- */
+header.masthead{
+  border-bottom:1px solid var(--rule);
+  padding:64px 0 40px;
+  margin-bottom:8px;
+}
+.eyebrow{
+  font-family:var(--mono);
+  font-size:11px;
+  font-weight:500;
+  letter-spacing:.14em;
+  text-transform:uppercase;
+  color:var(--accent);
+  margin:0 0 20px;
+}
+h1{
+  font-family:var(--display);
+  font-weight:700;
+  font-size:clamp(38px,6.2vw,68px);
+  line-height:1.02;
+  letter-spacing:-.025em;
+  margin:0 0 22px;
+  text-wrap:balance;
+}
+.lede{
+  font-size:20px;
+  line-height:1.55;
+  color:var(--ink-soft);
+  max-width:60ch;
+  margin:0 0 30px;
+}
+.lede strong{color:var(--ink);font-weight:600}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin:0;padding:0;list-style:none}
+.chips li{
+  font-family:var(--mono);
+  font-size:11.5px;
+  letter-spacing:.03em;
+  color:var(--ink-soft);
+  background:var(--surface);
+  border:1px solid var(--rule);
+  border-radius:3px;
+  padding:5px 10px;
+}
+.chips li.hot{color:var(--accent);border-color:var(--accent);background:var(--accent-soft)}
+
+/* ---------- секции ---------- */
+section{padding:56px 0;border-bottom:1px solid var(--rule)}
+section:last-of-type{border-bottom:0}
+.stage{
+  font-family:var(--mono);
+  font-size:11px;
+  letter-spacing:.13em;
+  text-transform:uppercase;
+  color:var(--ink-faint);
+  margin:0 0 10px;
+}
+h2{
+  font-family:var(--display);
+  font-weight:600;
+  font-size:clamp(26px,3.4vw,36px);
+  line-height:1.12;
+  letter-spacing:-.018em;
+  margin:0 0 18px;
+  text-wrap:balance;
+}
+h3{
+  font-family:var(--display);
+  font-weight:600;
+  font-size:19px;
+  letter-spacing:-.008em;
+  margin:38px 0 12px;
+}
+p{margin:0 0 18px}
+.prose ul{margin:0 0 18px;padding-left:22px}
+.prose li{margin-bottom:9px}
+code{
+  font-family:var(--mono);
+  font-size:.86em;
+  background:var(--surface-2);
+  border-radius:3px;
+  padding:1.5px 5px;
+}
+strong{font-weight:600}
+
+/* ---------- врезка ---------- */
+.note{
+  border-left:3px solid var(--accent);
+  background:var(--surface);
+  padding:18px 22px;
+  margin:26px 0;
+  max-width:64ch;
+}
+.note p:last-child{margin-bottom:0}
+.note .tag{
+  font-family:var(--mono);
+  font-size:10.5px;
+  letter-spacing:.12em;
+  text-transform:uppercase;
+  color:var(--accent);
+  display:block;
+  margin-bottom:7px;
+}
+
+/* ---------- код ---------- */
+pre{
+  font-family:var(--mono);
+  font-size:13px;
+  line-height:1.62;
+  background:var(--surface);
+  border:1px solid var(--rule);
+  border-radius:5px;
+  padding:18px 20px;
+  overflow-x:auto;
+  margin:0 0 24px;
+  color:var(--ink);
+}
+pre code{background:none;padding:0;font-size:inherit}
+.kw{color:var(--accent);font-weight:500}
+.cm{color:var(--ink-faint);font-style:italic}
+.hl{color:var(--warn);font-weight:500}
+
+/* ---------- диаграммы ---------- */
+figure{margin:32px 0 8px;padding:0}
+.fig{
+  background:var(--surface);
+  border:1px solid var(--rule);
+  border-radius:6px;
+  padding:22px 20px 16px;
+  overflow-x:auto;
+}
+.fig svg{display:block;width:100%;min-width:640px;max-width:100%;height:auto}
+.fig svg text{font-family:var(--mono)}
+figcaption{
+  font-size:14.5px;
+  line-height:1.5;
+  color:var(--ink-soft);
+  margin-top:14px;
+  max-width:70ch;
+}
+figcaption b{color:var(--ink);font-weight:600}
+
+/* классы для SVG */
+.s-box{fill:var(--surface);stroke:var(--rule);stroke-width:1.5}
+.s-box-2{fill:var(--surface-2);stroke:var(--rule);stroke-width:1.5}
+.s-box-ac{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.75}
+.s-line{stroke:var(--ink-soft);stroke-width:1.5;fill:none}
+.s-line-ac{stroke:var(--accent);stroke-width:2;fill:none}
+.s-line-bad{stroke:var(--bad);stroke-width:1.75;fill:none}
+.s-dash{stroke:var(--rule);stroke-width:1.5;fill:none;stroke-dasharray:4 5}
+.s-dash-ret{stroke:var(--warn);stroke-width:1.5;fill:none;stroke-dasharray:5 4}
+.t{fill:var(--ink);font-size:12px}
+.t-b{fill:var(--ink);font-size:12.5px;font-weight:700}
+.t-s{fill:var(--ink-soft);font-size:10.5px}
+.t-f{fill:var(--ink-faint);font-size:10px}
+.t-ac{fill:var(--accent);font-size:11px;font-weight:500}
+.t-ac-b{fill:var(--accent);font-size:12.5px;font-weight:700}
+.t-bad{fill:var(--bad);font-size:11px;font-weight:500}
+.t-bad-b{fill:var(--bad);font-size:12.5px;font-weight:700}
+.t-ok{fill:var(--ok);font-size:11px;font-weight:500}
+.t-warn{fill:var(--warn);font-size:10.5px}
+.mk{fill:var(--ink-soft)}
+.mk-ac{fill:var(--accent)}
+.mk-bad{fill:var(--bad)}
+.mk-warn{fill:var(--warn)}
+.band{fill:var(--surface-2);opacity:.55}
+.band-ac{fill:var(--accent-soft);opacity:.7}
+
+/* ---------- таблица ---------- */
+.table-wrap{overflow-x:auto;margin:26px 0}
+table{border-collapse:collapse;width:100%;min-width:600px;font-size:15px}
+th,td{
+  text-align:left;
+  padding:11px 14px;
+  border-bottom:1px solid var(--rule);
+  vertical-align:top;
+}
+th{
+  font-family:var(--mono);
+  font-size:11px;
+  letter-spacing:.1em;
+  text-transform:uppercase;
+  color:var(--ink-faint);
+  font-weight:500;
+  border-bottom:1.5px solid var(--ink-faint);
+}
+td.n{
+  font-family:var(--mono);
+  font-size:13px;
+  color:var(--accent);
+  white-space:nowrap;
+  font-variant-numeric:tabular-nums;
+}
+td code{font-size:12.5px}
+
+/* ---------- подвал ---------- */
+footer{
+  padding:44px 0 0;
+  font-size:14.5px;
+  color:var(--ink-soft);
+  display:flex;
+  flex-wrap:wrap;
+  gap:10px 28px;
+  align-items:baseline;
+}
+footer a{color:var(--accent);text-decoration:none;border-bottom:1px solid var(--rule)}
+footer a:hover{border-bottom-color:var(--accent)}
+a:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+
+@media (max-width:640px){
+  body{font-size:16px}
+  .wrap{padding:0 18px 64px}
+  section{padding:40px 0}
+}
+</style>
+
+<div class="wrap">
+
+<header class="masthead">
+  <p class="eyebrow">Ядро магазина цифровых товаров · техническая документация</p>
+  <h1>Архитектура ядра выдачи</h1>
+  <p class="lede">Документ описывает состав компонентов, жизненный цикл заказа и механизмы, обеспечивающие однократную выдачу товара при конкурентной обработке вебхуков, отказах поставщиков и перезапуске процессов.</p>
+  <ul class="chips">
+    <li>PHP 8.3 без фреймворка</li>
+    <li>PostgreSQL 16</li>
+    <li>очередь в той же БД</li>
+    <li class="hot">exactly-once</li>
+    <li class="hot">таймаут ≠ отказ</li>
+  </ul>
+</header>
+
+<!-- ==================== 1. КОМПОНЕНТЫ ==================== -->
+<section>
+  <p class="stage">Общая картина</p>
+  <h2>Взаимодействие компонентов</h2>
+
+  <div class="prose">
+    <p>Система состоит из четырёх процессов: веб-процесс (php-fpm), фоновый воркер очереди, планировщик и заглушки поставщиков. Прямых вызовов между ними нет — обмен идёт через таблицы PostgreSQL.</p>
+    <p>Задача на выдачу создаётся в той же транзакции, что и смена статуса заказа. Оба изменения фиксируются одним <code>COMMIT</code>, поэтому состояние «заказ оплачен, задача отсутствует» недостижимо.</p>
+  </div>
+
+  <figure>
+    <div class="fig">
+      <svg viewBox="0 0 900 500" role="img" aria-label="Схема компонентов: клиент и платёжная система обращаются к API, API пишет в PostgreSQL, воркер забирает задачи из PostgreSQL и ходит к поставщикам A и B, планировщик доводит зависшие заказы">
+        <defs>
+          <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" class="mk"/>
+          </marker>
+          <marker id="a1ac" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" class="mk-ac"/>
+          </marker>
+        </defs>
+
+        <!-- Клиент -->
+        <rect class="s-box" x="40" y="40" width="150" height="64" rx="5"/>
+        <text class="t-b" x="115" y="68" text-anchor="middle">Клиент</text>
+        <text class="t-s" x="115" y="87" text-anchor="middle">витрина, приложение</text>
+
+        <!-- API -->
+        <rect class="s-box" x="330" y="40" width="240" height="80" rx="5"/>
+        <text class="t-b" x="450" y="66" text-anchor="middle">nginx + php-fpm</text>
+        <text class="t-s" x="450" y="85" text-anchor="middle">тонкие контроллеры</text>
+        <text class="t-s" x="450" y="103" text-anchor="middle">отвечает и умирает</text>
+
+        <!-- Платёжка -->
+        <rect class="s-box" x="710" y="40" width="150" height="64" rx="5"/>
+        <text class="t-b" x="785" y="68" text-anchor="middle">Платёжная</text>
+        <text class="t-s" x="785" y="87" text-anchor="middle">at-least-once</text>
+
+        <!-- PostgreSQL -->
+        <rect class="s-box-ac" x="330" y="170" width="240" height="150" rx="6"/>
+        <text class="t-ac-b" x="450" y="197" text-anchor="middle">PostgreSQL</text>
+        <text class="t" x="450" y="223" text-anchor="middle">orders · payment_events</text>
+        <text class="t" x="450" y="243" text-anchor="middle">deliveries · stock_pool</text>
+        <text class="t" x="450" y="263" text-anchor="middle">ledger_entries</text>
+        <text class="t-ac" x="450" y="291" text-anchor="middle">jobs — очередь здесь же</text>
+        <text class="t-f" x="450" y="309" text-anchor="middle">одна транзакция на данные и задачу</text>
+
+        <!-- Воркер -->
+        <rect class="s-box" x="250" y="380" width="200" height="76" rx="5"/>
+        <text class="t-b" x="350" y="408" text-anchor="middle">bin/worker</text>
+        <text class="t-s" x="350" y="427" text-anchor="middle">вечный процесс</text>
+        <text class="t-s" x="350" y="445" text-anchor="middle">retry · backoff · fallback</text>
+
+        <!-- Планировщик -->
+        <rect class="s-box" x="30" y="380" width="180" height="76" rx="5"/>
+        <text class="t-b" x="120" y="408" text-anchor="middle">bin/heal</text>
+        <text class="t-s" x="120" y="427" text-anchor="middle">раз в минуту</text>
+        <text class="t-s" x="120" y="445" text-anchor="middle">доводит зависшие</text>
+
+        <!-- Поставщики -->
+        <rect class="s-box" x="560" y="352" width="180" height="52" rx="5"/>
+        <text class="t-b" x="650" y="374" text-anchor="middle">Поставщик A</text>
+        <text class="t-s" x="650" y="392" text-anchor="middle">основной</text>
+
+        <rect class="s-box" x="560" y="422" width="180" height="52" rx="5"/>
+        <text class="t-b" x="650" y="444" text-anchor="middle">Поставщик B</text>
+        <text class="t-s" x="650" y="462" text-anchor="middle">резерв</text>
+
+        <!-- Стрелки: клиент -->
+        <line class="s-line" x1="192" y1="66" x2="324" y2="66" marker-end="url(#a1)"/>
+        <text class="t-f" x="258" y="58" text-anchor="middle">POST /api/orders</text>
+        <line class="s-line" x1="324" y1="92" x2="192" y2="92" marker-end="url(#a1)"/>
+        <text class="t-f" x="258" y="108" text-anchor="middle">order_id · код</text>
+
+        <!-- Стрелки: платёжка -->
+        <line class="s-line" x1="706" y1="66" x2="576" y2="66" marker-end="url(#a1)"/>
+        <text class="t-f" x="641" y="58" text-anchor="middle">вебхук paid</text>
+        <line class="s-line" x1="576" y1="92" x2="706" y2="92" marker-end="url(#a1)"/>
+        <text class="t-f" x="641" y="108" text-anchor="middle">200 OK · 8 мс</text>
+
+        <!-- API -> PG -->
+        <line class="s-line-ac" x1="450" y1="124" x2="450" y2="164" marker-end="url(#a1ac)"/>
+        <text class="t-ac" x="586" y="140">одна транзакция:</text>
+        <text class="t-f" x="586" y="156">статус + задача вместе</text>
+
+        <!-- PG <-> воркер -->
+        <line class="s-line" x1="410" y1="324" x2="380" y2="374" marker-end="url(#a1)"/>
+        <text class="t-f" x="360" y="345" text-anchor="end">берёт задачу</text>
+        <line class="s-line" x1="470" y1="374" x2="500" y2="324" marker-end="url(#a1)"/>
+        <text class="t-f" x="516" y="345">пишет выдачу</text>
+
+        <!-- воркер -> поставщики -->
+        <line class="s-line" x1="452" y1="400" x2="556" y2="382" marker-end="url(#a1)"/>
+        <text class="t-f" x="504" y="372" text-anchor="middle">POST /issue</text>
+        <line class="s-line" x1="452" y1="428" x2="556" y2="444" marker-end="url(#a1)"/>
+        <text class="t-f" x="504" y="462" text-anchor="middle">только если A отказал</text>
+        <text class="t-warn" x="650" y="336" text-anchor="middle">таймаут 2 с · 3 попытки</text>
+
+        <!-- планировщик -> PG -->
+        <path class="s-line" d="M120,376 L120,290 L324,290" marker-end="url(#a1)"/>
+        <text class="t-f" x="222" y="282" text-anchor="middle">чинит зависшие</text>
+      </svg>
+    </div>
+    <figcaption>Точка интеграции — база данных. Веб-процесс записывает строку в <code>jobs</code>, воркер её забирает; взаимной осведомлённости между процессами нет. Остановка воркера не приводит к потере задач: они сохраняются в таблице до обработки.</figcaption>
+  </figure>
+</section>
+
+<!-- ==================== 2. ПУТЬ ЗАКАЗА ==================== -->
+<section>
+  <p class="stage">Этап 1 · ядро API</p>
+  <h2>Жизненный цикл заказа</h2>
+
+  <div class="prose">
+    <p>Сквозной сценарий от создания заказа до получения кода клиентом. Сценарий разделён на синхронную и асинхронную части; граница проходит по ответу платёжной системе.</p>
+  </div>
+
+  <figure>
+    <div class="fig">
+      <svg viewBox="0 0 900 620" role="img" aria-label="Диаграмма последовательности: клиент создаёт заказ, платёжная система шлёт вебхук, API отвечает 200 за миллисекунды, затем фоновый воркер получает код у поставщика и клиент забирает его отдельным запросом">
+        <defs>
+          <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" class="mk"/>
+          </marker>
+          <marker id="a2ac" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" class="mk-ac"/>
+          </marker>
+        </defs>
+
+        <rect class="band" x="0" y="86" width="900" height="252"/>
+        <rect class="band-ac" x="0" y="346" width="900" height="176"/>
+        <rect class="band" x="0" y="530" width="900" height="76"/>
+
+        <text class="t-f" x="892" y="102" text-anchor="end">СИНХРОННО · МИЛЛИСЕКУНДЫ</text>
+        <text class="t-ac" x="892" y="362" text-anchor="end">АСИНХРОННО · ДО 15 СЕКУНД</text>
+        <text class="t-f" x="892" y="546" text-anchor="end">КЛИЕНТ ЗАБИРАЕТ КОД</text>
+
+        <!-- шапки дорожек -->
+        <rect class="s-box-2" x="12" y="20" width="126" height="36" rx="4"/>
+        <text class="t-b" x="75" y="43" text-anchor="middle">Клиент</text>
+        <rect class="s-box-2" x="157" y="20" width="126" height="36" rx="4"/>
+        <text class="t-b" x="220" y="43" text-anchor="middle">Платёжка</text>
+        <rect class="s-box-2" x="312" y="20" width="126" height="36" rx="4"/>
+        <text class="t-b" x="375" y="43" text-anchor="middle">API</text>
+        <rect class="s-box-2" x="467" y="20" width="126" height="36" rx="4"/>
+        <text class="t-b" x="530" y="43" text-anchor="middle">Postgres</text>
+        <rect class="s-box-2" x="617" y="20" width="126" height="36" rx="4"/>
+        <text class="t-b" x="680" y="43" text-anchor="middle">Воркер</text>
+        <rect class="s-box-2" x="767" y="20" width="126" height="36" rx="4"/>
+        <text class="t-b" x="830" y="43" text-anchor="middle">Поставщик</text>
+
+        <!-- линии жизни -->
+        <line class="s-dash" x1="75" y1="60" x2="75" y2="606"/>
+        <line class="s-dash" x1="220" y1="60" x2="220" y2="606"/>
+        <line class="s-dash" x1="375" y1="60" x2="375" y2="606"/>
+        <line class="s-dash" x1="530" y1="60" x2="530" y2="606"/>
+        <line class="s-dash" x1="680" y1="60" x2="680" y2="606"/>
+        <line class="s-dash" x1="830" y1="60" x2="830" y2="606"/>
+
+        <line class="s-line" x1="75" y1="112" x2="371" y2="112" marker-end="url(#a2)"/>
+        <text class="t-f" x="223" y="104" text-anchor="middle">POST /api/orders { sku }</text>
+
+        <line class="s-line" x1="375" y1="156" x2="526" y2="156" marker-end="url(#a2)"/>
+        <text class="t-f" x="450" y="148" text-anchor="middle">INSERT orders · created</text>
+
+        <line class="s-line" x1="375" y1="200" x2="79" y2="200" marker-end="url(#a2)"/>
+        <text class="t-f" x="227" y="192" text-anchor="middle">ord_01J8… · к оплате 1990 ₽</text>
+
+        <line class="s-line" x1="220" y1="244" x2="371" y2="244" marker-end="url(#a2)"/>
+        <text class="t-f" x="295" y="236" text-anchor="middle">вебхук paid evt_1</text>
+
+        <line class="s-line-ac" x1="375" y1="300" x2="526" y2="300" marker-end="url(#a2ac)"/>
+        <text class="t-ac" x="450" y="278" text-anchor="middle">событие + paid + задача</text>
+        <text class="t-ac" x="450" y="292" text-anchor="middle">одним COMMIT</text>
+
+        <line class="s-line" x1="375" y1="326" x2="224" y2="326" marker-end="url(#a2)"/>
+        <text class="t-f" x="299" y="318" text-anchor="middle">200 OK</text>
+
+        <line class="s-line" x1="680" y1="380" x2="534" y2="380" marker-end="url(#a2)"/>
+        <text class="t-f" x="607" y="372" text-anchor="middle">claim · SKIP LOCKED</text>
+
+        <line class="s-line" x1="680" y1="424" x2="826" y2="424" marker-end="url(#a2)"/>
+        <text class="t-f" x="753" y="416" text-anchor="middle">POST /issue req_1</text>
+
+        <line class="s-line" x1="830" y1="468" x2="684" y2="468" marker-end="url(#a2)"/>
+        <text class="t-f" x="757" y="460" text-anchor="middle">code P3EI-W8UO</text>
+
+        <line class="s-line-ac" x1="680" y1="512" x2="534" y2="512" marker-end="url(#a2ac)"/>
+        <text class="t-ac" x="607" y="504" text-anchor="middle">deliveries · delivered</text>
+
+        <line class="s-line" x1="75" y1="562" x2="371" y2="562" marker-end="url(#a2)"/>
+        <text class="t-f" x="223" y="554" text-anchor="middle">GET /api/orders/{id}</text>
+
+        <line class="s-line" x1="375" y1="598" x2="79" y2="598" marker-end="url(#a2)"/>
+        <text class="t-f" x="227" y="590" text-anchor="middle">ключ</text>
+      </svg>
+    </div>
+    <figcaption>Операции до ответа <code>200 OK</code> выполняются за миллисекунды: превышение таймаута платёжной системы приводит к повторной доставке вебхука. Операции после ответа не ограничены по времени — открытого соединения на другом конце уже нет.</figcaption>
+  </figure>
+
+  <div class="note">
+    <span class="tag">обоснование асинхронной выдачи</span>
+    <p>Время ответа поставщика достигает 15 секунд при пуле php-fpm в 24 процесса. Синхронный вызов поставщика из обработчика вебхука исчерпывает пул на 25-м запросе и приводит к отказу в обслуживании всех остальных маршрутов, включая витрину.</p>
+  </div>
+</section>
+
+<!-- ==================== 3. ГОНКИ ==================== -->
+<section>
+  <p class="stage">Этап 2 · exactly-once</p>
+  <h2>Конкурентная обработка вебхуков</h2>
+
+  <div class="prose">
+    <p>Проверочный сценарий — пятьдесят одновременных вебхуков по одному заказу. Проверка факта выдачи перед её выполнением требование не закрывает:</p>
+
+    <pre><code><span class="cm">// все 50 процессов выполняют эту строку одновременно</span>
+$order = SELECT * FROM orders WHERE id = 'ord_1';
+
+<span class="kw">if</span> ($order->code === <span class="kw">null</span>) {      <span class="cm">// все 50 видят true</span>
+    $code = $provider->issue();  <span class="cm">// все 50 выдают ключ</span>
+}</code></pre>
+
+    <p>Условие и запись разделены во времени, поэтому все параллельные обработчики проходят проверку до того, как любой из них завершит выдачу. Проверка на уровне приложения не атомарна. Требование обеспечивается ограничением уникальности, которое делает вторую запись невозможной.</p>
+  </div>
+
+  <figure>
+    <div class="fig">
+      <svg viewBox="0 0 900 350" role="img" aria-label="Пятьдесят параллельных вебхуков делают INSERT в таблицу deliveries; уникальный индекс по order_id пропускает ровно один, остальные сорок девять получают ошибку уникальности и отвечают 200 OK без действий">
+        <defs>
+          <marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" class="mk"/>
+          </marker>
+          <marker id="a3ac" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" class="mk-ac"/>
+          </marker>
+        </defs>
+
+        <!-- каскад вебхуков -->
+        <rect class="s-box" x="30" y="68" width="160" height="46" rx="4"/>
+        <rect class="s-box" x="36" y="76" width="160" height="46" rx="4"/>
+        <rect class="s-box" x="42" y="84" width="160" height="46" rx="4"/>
+        <rect class="s-box" x="48" y="92" width="160" height="46" rx="4"/>
+        <rect class="s-box-2" x="54" y="100" width="160" height="46" rx="4"/>
+        <text class="t-b" x="134" y="122" text-anchor="middle">вебхук paid</text>
+        <text class="t-s" x="134" y="139" text-anchor="middle">один и тот же заказ</text>
+        <text class="t-ac-b" x="134" y="182" text-anchor="middle">× 50</text>
+        <text class="t-f" x="134" y="200" text-anchor="middle">одновременно</text>
+
+        <!-- веер -->
+        <line class="s-line" x1="216" y1="96" x2="352" y2="128" marker-end="url(#a3)"/>
+        <line class="s-line" x1="216" y1="112" x2="352" y2="150" marker-end="url(#a3)"/>
+        <line class="s-line" x1="216" y1="128" x2="352" y2="172" marker-end="url(#a3)"/>
+        <line class="s-line" x1="216" y1="144" x2="352" y2="194" marker-end="url(#a3)"/>
+        <line class="s-line" x1="216" y1="160" x2="352" y2="216" marker-end="url(#a3)"/>
+        <text class="t-f" x="284" y="60" text-anchor="middle">все делают INSERT</text>
+
+        <!-- ворота -->
+        <rect class="s-box-ac" x="356" y="60" width="220" height="230" rx="6"/>
+        <text class="t-ac-b" x="466" y="92" text-anchor="middle">deliveries</text>
+        <line class="s-line-ac" x1="376" y1="106" x2="556" y2="106"/>
+        <text class="t" x="466" y="132" text-anchor="middle">INSERT (order_id, …)</text>
+        <text class="t-ac" x="466" y="164" text-anchor="middle">UNIQUE (order_id)</text>
+        <line class="s-dash" x1="376" y1="188" x2="556" y2="188"/>
+        <text class="t-s" x="466" y="214" text-anchor="middle">решает движок БД,</text>
+        <text class="t-s" x="466" y="232" text-anchor="middle">а не код на PHP</text>
+        <text class="t-f" x="466" y="262" text-anchor="middle">блокировка на уровне</text>
+        <text class="t-f" x="466" y="278" text-anchor="middle">индекса, не строки кода</text>
+
+        <!-- выходы -->
+        <line class="s-line-ac" x1="580" y1="120" x2="692" y2="120" marker-end="url(#a3ac)"/>
+        <text class="t-ac" x="636" y="110" text-anchor="middle">1 прошёл</text>
+        <rect class="s-box-ac" x="698" y="94" width="176" height="54" rx="5"/>
+        <text class="t-ac-b" x="786" y="118" text-anchor="middle">выдача ключа</text>
+        <text class="t-f" x="786" y="136" text-anchor="middle">ровно один раз</text>
+
+        <line class="s-line" x1="580" y1="230" x2="692" y2="230" marker-end="url(#a3)"/>
+        <text class="t-f" x="636" y="220" text-anchor="middle">49 × ошибка 23505</text>
+        <rect class="s-box" x="698" y="204" width="176" height="54" rx="5"/>
+        <text class="t-b" x="786" y="228" text-anchor="middle">200 OK</text>
+        <text class="t-f" x="786" y="246" text-anchor="middle">ничего не делаем</text>
+      </svg>
+    </div>
+    <figcaption>Нарушение уникальности — штатный результат конкурентной вставки. <code>SQLSTATE 23505</code> означает, что выдача по заказу уже создана другим обработчиком; корректная реакция — <code>200 OK</code>. Ответ <code>5xx</code> приводит к бесконечной повторной доставке вебхука.</figcaption>
+  </figure>
+
+  <h3>Инварианты уровня БД</h3>
+  <div class="prose">
+    <pre><code><span class="kw">UNIQUE</span> (payment_events.event_id)  <span class="cm">-- повтор события ничего не меняет</span>
+<span class="kw">UNIQUE</span> (deliveries.order_id)      <span class="cm">-- один факт выдачи на заказ</span>
+<span class="kw">UNIQUE</span> (stock_pool.order_id)      <span class="cm">-- один ключ не уйдёт в два заказа</span></code></pre>
+    <p>Инварианты обеспечиваются ограничениями PostgreSQL, а не проверками в приложении, и сохраняются при конкурентном доступе, повторной доставке событий и ошибках в вызывающем коде.</p>
+  </div>
+
+  <div class="note">
+    <span class="tag">дубли и потери</span>
+    <p>Ограничения уникальности исключают дубли, но не потери. Если запись «событие обработано» зафиксирована до выполнения выдачи, повторная доставка будет отброшена как дубликат, и выдача не произойдёт. Формально операция идемпотентна, фактически заказ остаётся неисполненным.</p>
+    <p>Поэтому запись о событии фиксирует не факт получения, а исход обработки: она коммитится вместе с результатом. Заказы, оставшиеся в промежуточном состоянии, обрабатываются фоновой задачей восстановления.</p>
+  </div>
+</section>
+
+<!-- ==================== 4. ТАЙМАУТ ==================== -->
+<section>
+  <p class="stage">Этап 3 · устойчивые интеграции</p>
+  <h2>Обработка таймаута поставщика</h2>
+
+  <div class="prose">
+    <p>Отсутствие ответа в пределах таймаута не эквивалентно отказу: поставщик мог выполнить выдачу, а ответ — не дойти. Трактовка таймаута как отказа с последующим переключением на резервного поставщика приводит к повторной выдаче по одному заказу.</p>
+  </div>
+
+  <figure>
+    <div class="fig">
+      <svg viewBox="0 0 920 400" role="img" aria-label="Сравнение двух реакций на таймаут: слева таймаут трактуется как отказ и происходит переключение на поставщика B, что даёт два ключа; справа таймаут даёт исход unknown, повтор идёт к тому же поставщику с тем же request_id и возвращает тот же ключ">
+        <defs>
+          <marker id="a4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" class="mk"/>
+          </marker>
+          <marker id="a4b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" class="mk-bad"/>
+          </marker>
+          <marker id="a4a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" class="mk-ac"/>
+          </marker>
+        </defs>
+
+        <!-- ЛЕВАЯ ПАНЕЛЬ -->
+        <rect class="s-box" x="10" y="14" width="440" height="372" rx="8"/>
+        <text class="t-bad-b" x="230" y="42" text-anchor="middle">✗ таймаут = отказ</text>
+
+        <rect class="s-box-2" x="40" y="62" width="380" height="46" rx="4"/>
+        <text class="t" x="230" y="82" text-anchor="middle">req_1 → Поставщик A</text>
+        <text class="t-bad" x="230" y="99" text-anchor="middle">A выдал K1 · ответ не дошёл</text>
+        <line class="s-line-bad" x1="230" y1="108" x2="230" y2="120" marker-end="url(#a4b)"/>
+
+        <rect class="s-box-2" x="40" y="124" width="380" height="46" rx="4"/>
+        <text class="t" x="230" y="144" text-anchor="middle">таймаут 2 с</text>
+        <text class="t-bad" x="230" y="161" text-anchor="middle">трактуем как отказ</text>
+        <line class="s-line-bad" x1="230" y1="170" x2="230" y2="182" marker-end="url(#a4b)"/>
+
+        <rect class="s-box-2" x="40" y="186" width="380" height="46" rx="4"/>
+        <text class="t" x="230" y="206" text-anchor="middle">fallback → Поставщик B</text>
+        <text class="t-bad" x="230" y="223" text-anchor="middle">новый request_id</text>
+        <line class="s-line-bad" x1="230" y1="232" x2="230" y2="244" marker-end="url(#a4b)"/>
+
+        <rect class="s-box-2" x="40" y="248" width="380" height="46" rx="4"/>
+        <text class="t" x="230" y="276" text-anchor="middle">B выдал K2</text>
+        <line class="s-line-bad" x1="230" y1="294" x2="230" y2="306" marker-end="url(#a4b)"/>
+
+        <rect x="40" y="310" width="380" height="48" rx="4" fill="none" stroke="var(--bad)" stroke-width="1.75"/>
+        <text class="t-bad-b" x="230" y="332" text-anchor="middle">K1 + K2 — двойная выдача</text>
+        <text class="t-f" x="230" y="349" text-anchor="middle">убыток на каждом таймауте</text>
+
+        <!-- ПРАВАЯ ПАНЕЛЬ -->
+        <rect class="s-box" x="470" y="14" width="440" height="372" rx="8"/>
+        <text class="t-ac-b" x="690" y="42" text-anchor="middle">✓ таймаут = «не знаю»</text>
+
+        <rect class="s-box-2" x="500" y="62" width="380" height="46" rx="4"/>
+        <text class="t" x="690" y="82" text-anchor="middle">req_1 → Поставщик A</text>
+        <text class="t-warn" x="690" y="99" text-anchor="middle">A выдал K1 · ответ не дошёл</text>
+        <line class="s-line-ac" x1="690" y1="108" x2="690" y2="120" marker-end="url(#a4a)"/>
+
+        <rect class="s-box-2" x="500" y="124" width="380" height="46" rx="4"/>
+        <text class="t" x="690" y="144" text-anchor="middle">таймаут 2 с</text>
+        <text class="t-ac" x="690" y="161" text-anchor="middle">исход = unknown, не отказ</text>
+        <line class="s-line-ac" x1="690" y1="170" x2="690" y2="182" marker-end="url(#a4a)"/>
+
+        <rect class="s-box-2" x="500" y="186" width="380" height="46" rx="4"/>
+        <text class="t" x="690" y="206" text-anchor="middle">повтор с тем же req_1</text>
+        <text class="t-ac" x="690" y="223" text-anchor="middle">на B не уходим, пока не выяснили</text>
+        <line class="s-line-ac" x1="690" y1="232" x2="690" y2="244" marker-end="url(#a4a)"/>
+
+        <rect class="s-box-2" x="500" y="248" width="380" height="46" rx="4"/>
+        <text class="t" x="690" y="269" text-anchor="middle">A вернул тот же K1</text>
+        <text class="t-f" x="690" y="285" text-anchor="middle">это обязанность поставщика по контракту</text>
+        <line class="s-line-ac" x1="690" y1="294" x2="690" y2="306" marker-end="url(#a4a)"/>
+
+        <rect class="s-box-ac" x="500" y="310" width="380" height="48" rx="4"/>
+        <text class="t-ac-b" x="690" y="332" text-anchor="middle">один ключ · один заказ</text>
+        <text class="t-f" x="690" y="349" text-anchor="middle">сколько бы раз ни повторили</text>
+      </svg>
+    </div>
+    <figcaption>Варианты различаются трактовкой неответа, а не числом попыток. Слева таймаут сводится к отказу; справа фиксируется как отдельный исход <code>unknown</code>, подлежащий разрешению до переключения на резервного поставщика.</figcaption>
+  </figure>
+
+  <h3>Условие безопасного повтора</h3>
+  <div class="prose">
+    <p><code>request_id</code> детерминирован и выводится из пары «заказ — поставщик», а не генерируется заново на каждую попытку.</p>
+    <pre><code>request_id = req_{order_id}_{provider}     <span class="cm">// одинаков для всех повторов</span>
+
+<span class="cm">// на стороне поставщика:</span>
+<span class="kw">UNIQUE</span> (provider, request_id) → тот же ключ на тот же запрос</code></pre>
+    <p>Повтор после таймаута не инициирует новую выдачу, а возвращает результат исходного запроса. Переключение на резервного поставщика допускается только после явного <code>error</code> или <code>out_of_stock</code>, то есть при наличии ответа.</p>
+  </div>
+</section>
+
+<!-- ==================== 5. СОСТОЯНИЯ ==================== -->
+<section>
+  <p class="stage">Модель заказа</p>
+  <h2>Состояния заказа</h2>
+
+  <div class="prose">
+    <p>Множество переходов задано белым списком: разрешены только перечисленные, остальные запрещены по умолчанию. Проверка выполняется объектом заказа, владеющим состоянием.</p>
+  </div>
+
+  <figure>
+    <div class="fig">
+      <svg viewBox="0 0 900 360" role="img" aria-label="Машина состояний заказа: created переходит в paid и далее в delivering и delivered; из created возможен payment_failed; из delivering — out_of_stock и delivery_failed, оба возвращаются в delivering после восстановления">
+        <defs>
+          <marker id="a5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" class="mk"/>
+          </marker>
+          <marker id="a5w" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" class="mk-warn"/>
+          </marker>
+        </defs>
+
+        <!-- легенда -->
+        <circle cx="36" cy="20" r="5" fill="var(--flow)"/>
+        <text class="t-f" x="48" y="24">в работе</text>
+        <circle cx="150" cy="20" r="5" fill="var(--ok)"/>
+        <text class="t-f" x="162" y="24">успех</text>
+        <circle cx="240" cy="20" r="5" fill="var(--bad)"/>
+        <text class="t-f" x="252" y="24">провал</text>
+        <circle cx="336" cy="20" r="5" fill="var(--warn)"/>
+        <text class="t-f" x="348" y="24">восстановимый</text>
+
+        <!-- основной путь -->
+        <rect x="30" y="60" width="130" height="48" rx="16" fill="none" stroke="var(--flow)" stroke-width="1.75"/>
+        <text class="t-b" x="95" y="90" text-anchor="middle">created</text>
+
+        <rect x="230" y="60" width="110" height="48" rx="16" fill="none" stroke="var(--flow)" stroke-width="1.75"/>
+        <text class="t-b" x="285" y="90" text-anchor="middle">paid</text>
+
+        <rect x="410" y="60" width="150" height="48" rx="16" fill="none" stroke="var(--flow)" stroke-width="1.75"/>
+        <text class="t-b" x="485" y="90" text-anchor="middle">delivering</text>
+
+        <rect x="640" y="60" width="150" height="48" rx="16" fill="var(--accent-soft)" stroke="var(--ok)" stroke-width="2"/>
+        <text class="t-b" x="715" y="90" text-anchor="middle">delivered</text>
+
+        <!-- ветви -->
+        <rect x="20" y="240" width="170" height="48" rx="16" fill="none" stroke="var(--bad)" stroke-width="1.75"/>
+        <text class="t-b" x="105" y="270" text-anchor="middle">payment_failed</text>
+
+        <rect x="350" y="240" width="160" height="48" rx="16" fill="none" stroke="var(--warn)" stroke-width="1.75"/>
+        <text class="t-b" x="430" y="270" text-anchor="middle">out_of_stock</text>
+
+        <rect x="550" y="240" width="180" height="48" rx="16" fill="none" stroke="var(--warn)" stroke-width="1.75"/>
+        <text class="t-b" x="640" y="270" text-anchor="middle">delivery_failed</text>
+
+        <!-- переходы -->
+        <line class="s-line" x1="162" y1="84" x2="226" y2="84" marker-end="url(#a5)"/>
+        <text class="t-f" x="194" y="74" text-anchor="middle">оплачен</text>
+
+        <line class="s-line" x1="342" y1="84" x2="406" y2="84" marker-end="url(#a5)"/>
+        <text class="t-f" x="374" y="74" text-anchor="middle">в очередь</text>
+
+        <line class="s-line" x1="562" y1="84" x2="636" y2="84" marker-end="url(#a5)"/>
+        <text class="t-f" x="599" y="74" text-anchor="middle">код получен</text>
+
+        <line class="s-line" x1="95" y1="110" x2="103" y2="236" marker-end="url(#a5)"/>
+        <text class="t-f" x="115" y="176">оплата не прошла</text>
+
+        <line class="s-line" x1="450" y1="110" x2="432" y2="236" marker-end="url(#a5)"/>
+        <text class="t-f" x="392" y="176" text-anchor="end">нет ключей</text>
+
+        <line class="s-line" x1="525" y1="110" x2="628" y2="236" marker-end="url(#a5)"/>
+        <text class="t-f" x="600" y="168">оба поставщика молчат</text>
+
+        <!-- возвраты -->
+        <line class="s-dash-ret" x1="420" y1="238" x2="468" y2="112" marker-end="url(#a5w)"/>
+        <line class="s-dash-ret" x1="580" y1="238" x2="508" y2="112" marker-end="url(#a5w)"/>
+
+        <text class="t-warn" x="480" y="322" text-anchor="middle">возврат безопасен: повтор идёт с тем же request_id,</text>
+        <text class="t-warn" x="480" y="340" text-anchor="middle">поэтому восстановление не создаёт вторую выдачу</text>
+      </svg>
+    </div>
+    <figcaption>Финальных состояний два: <code>delivered</code> и <code>payment_failed</code>. <code>out_of_stock</code> и <code>delivery_failed</code> — восстановимые состояния ожидания: после пополнения остатка или восстановления поставщика фоновая задача доводит заказ до <code>delivered</code>.</figcaption>
+  </figure>
+
+  <div class="note">
+    <span class="tag">реакция на запрещённый переход</span>
+    <p>Запрещённый переход обрабатывается как <code>no-op</code> с записью в лог, без исключения. Повторная доставка вебхуков предусмотрена контрактом платёжной системы; ответ <code>5xx</code> на повтор по уже выданному заказу приводит к бесконечным ретраям.</p>
+  </div>
+</section>
+
+<!-- ==================== 6. СХЕМА ДАННЫХ ==================== -->
+<section>
+  <p class="stage">Схема данных</p>
+  <h2>Схема данных</h2>
+
+  <div class="prose">
+    <p>Восемь таблиц. Уникальные индексы, обеспечивающие однократность выдачи, отмечены на схеме звёздочкой.</p>
+  </div>
+
+  <figure>
+    <div class="fig">
+      <svg viewBox="0 0 920 570" role="img" aria-label="Схема данных: products, orders, payment_events, deliveries, delivery_attempts, stock_pool, jobs и ledger_entries со связями и тремя уникальными индексами на event_id, deliveries.order_id и stock_pool.order_id">
+        <defs>
+          <marker id="a6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" class="mk"/>
+          </marker>
+          <marker id="a6ac" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" class="mk-ac"/>
+          </marker>
+        </defs>
+
+        <!-- products -->
+        <rect class="s-box" x="30" y="60" width="200" height="110" rx="5"/>
+        <rect class="s-box-2" x="30" y="60" width="200" height="28" rx="5"/>
+        <text class="t-b" x="44" y="79">products</text>
+        <text class="t-s" x="44" y="108">sku  PK</text>
+        <text class="t-s" x="44" y="128">name · type</text>
+        <text class="t-s" x="44" y="148">price_minor · currency</text>
+
+        <!-- stock_pool -->
+        <rect class="s-box" x="30" y="210" width="200" height="130" rx="5"/>
+        <rect class="s-box-2" x="30" y="210" width="200" height="28" rx="5"/>
+        <text class="t-b" x="44" y="229">stock_pool</text>
+        <text class="t-s" x="44" y="258">code  UNIQUE</text>
+        <text class="t-s" x="44" y="278">provider · sku</text>
+        <text class="t-ac" x="44" y="298">★ order_id  UNIQUE</text>
+        <text class="t-f" x="44" y="318">issued_at</text>
+
+        <!-- ledger_entries -->
+        <rect class="s-box" x="30" y="380" width="200" height="120" rx="5"/>
+        <rect class="s-box-2" x="30" y="380" width="200" height="28" rx="5"/>
+        <text class="t-b" x="44" y="399">ledger_entries</text>
+        <text class="t-s" x="44" y="428">txn_id · order_id</text>
+        <text class="t-s" x="44" y="448">account</text>
+        <text class="t-s" x="44" y="468">amount_signed</text>
+        <text class="t-ac" x="44" y="488">Σ по txn = 0</text>
+
+        <!-- orders -->
+        <rect class="s-box-ac" x="360" y="120" width="200" height="200" rx="5"/>
+        <rect x="360" y="120" width="200" height="28" rx="5" fill="var(--accent)"/>
+        <text x="374" y="139" font-size="12.5" font-weight="700" fill="var(--surface)">orders</text>
+        <text class="t-s" x="374" y="168">id  PK</text>
+        <text class="t-s" x="374" y="188">sku → products</text>
+        <text class="t-ac" x="374" y="208">price_minor — снапшот</text>
+        <text class="t-s" x="374" y="228">currency</text>
+        <text class="t-s" x="374" y="248">status</text>
+        <text class="t-f" x="374" y="268">created_at · paid_at</text>
+        <text class="t-f" x="374" y="288">delivered_at</text>
+        <text class="t-f" x="374" y="308">7 состояний, белый список</text>
+
+        <!-- jobs -->
+        <rect class="s-box" x="360" y="380" width="200" height="120" rx="5"/>
+        <rect class="s-box-2" x="360" y="380" width="200" height="28" rx="5"/>
+        <text class="t-b" x="374" y="399">jobs</text>
+        <text class="t-s" x="374" y="428">type · payload jsonb</text>
+        <text class="t-s" x="374" y="448">status · attempts</text>
+        <text class="t-s" x="374" y="468">run_at — бэкофф</text>
+        <text class="t-f" x="374" y="488">locked_at — lease</text>
+
+        <!-- payment_events -->
+        <rect class="s-box" x="690" y="40" width="200" height="130" rx="5"/>
+        <rect class="s-box-2" x="690" y="40" width="200" height="28" rx="5"/>
+        <text class="t-b" x="704" y="59">payment_events</text>
+        <text class="t-ac" x="704" y="88">★ event_id  PK</text>
+        <text class="t-s" x="704" y="108">order_id</text>
+        <text class="t-s" x="704" y="128">status · amount</text>
+        <text class="t-f" x="704" y="148">outcome — исход, не факт</text>
+
+        <!-- deliveries -->
+        <rect class="s-box" x="690" y="210" width="200" height="140" rx="5"/>
+        <rect class="s-box-2" x="690" y="210" width="200" height="28" rx="5"/>
+        <text class="t-b" x="704" y="229">deliveries</text>
+        <text class="t-ac" x="704" y="258">★ order_id  UNIQUE</text>
+        <text class="t-ac" x="704" y="278">★ request_id  UNIQUE</text>
+        <text class="t-s" x="704" y="298">provider · code</text>
+        <text class="t-s" x="704" y="318">status · attempts</text>
+        <text class="t-f" x="704" y="338">одна строка — один заказ</text>
+
+        <!-- delivery_attempts -->
+        <rect class="s-box" x="690" y="390" width="200" height="120" rx="5"/>
+        <rect class="s-box-2" x="690" y="390" width="200" height="28" rx="5"/>
+        <text class="t-b" x="704" y="409">delivery_attempts</text>
+        <text class="t-s" x="704" y="438">delivery_id · provider</text>
+        <text class="t-s" x="704" y="458">attempt_no · latency_ms</text>
+        <text class="t-ac" x="704" y="478">outcome: ok | error</text>
+        <text class="t-ac" x="704" y="498">| unknown ← таймаут</text>
+
+        <!-- связи -->
+        <line class="s-line" x1="356" y1="180" x2="234" y2="140" marker-end="url(#a6)"/>
+        <text class="t-f" x="296" y="146" text-anchor="middle">sku</text>
+
+        <line class="s-line" x1="686" y1="106" x2="564" y2="158" marker-end="url(#a6)"/>
+        <text class="t-f" x="624" y="122" text-anchor="middle">order_id</text>
+
+        <line class="s-line-ac" x1="686" y1="250" x2="564" y2="240" marker-end="url(#a6ac)"/>
+        <text class="t-ac" x="626" y="234" text-anchor="middle">1 : 1</text>
+
+        <line class="s-line" x1="790" y1="386" x2="790" y2="356" marker-end="url(#a6)"/>
+        <text class="t-f" x="800" y="374">delivery_id</text>
+
+        <line class="s-line-ac" x1="234" y1="278" x2="356" y2="256" marker-end="url(#a6ac)"/>
+        <text class="t-ac" x="296" y="252" text-anchor="middle">order_id</text>
+
+        <line class="s-line" x1="180" y1="376" x2="356" y2="308" marker-end="url(#a6)"/>
+        <text class="t-f" x="256" y="330" text-anchor="middle">order_id</text>
+
+        <line class="s-dash" x1="460" y1="376" x2="460" y2="326" marker-end="url(#a6)"/>
+        <text class="t-f" x="472" y="356">payload.order_id</text>
+        <text class="t-f" x="472" y="370">не внешний ключ</text>
+
+        <text class="t-ac" x="460" y="546" text-anchor="middle">★ — уникальный индекс, на котором держится однократная выдача</text>
+      </svg>
+    </div>
+    <figcaption>Выдача вынесена в отдельную сущность, а не в колонку <code>code</code> таблицы заказов: она хранит поставщика, стабильный <code>request_id</code>, историю попыток и исход <code>unknown</code>. Без этих полей разрешение таймаута невозможно.</figcaption>
+  </figure>
+</section>
+
+<!-- ==================== 7. КРИТЕРИИ ==================== -->
+<section>
+  <p class="stage">Проверка надёжности</p>
+  <h2>Проверочные сценарии</h2>
+
+  <div class="prose">
+    <p>Соответствие сценариев отказа и механизмов, которые их закрывают.</p>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>№</th><th>Сценарий</th><th>Что его закрывает</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="n">1</td>
+          <td>50 параллельных вебхуков — одна выдача</td>
+          <td><code>SELECT … FOR UPDATE</code> на строке заказа плюс <code>UNIQUE (deliveries.order_id)</code></td>
+        </tr>
+        <tr>
+          <td class="n">2</td>
+          <td>Повтор с тем же <code>event_id</code></td>
+          <td><code>INSERT … ON CONFLICT DO NOTHING</code>: ноль затронутых строк — значит дубль</td>
+        </tr>
+        <tr>
+          <td class="n">3</td>
+          <td>Вебхук вне порядка или раньше заказа</td>
+          <td>Событие сохраняется как «сирота» и применяется при создании заказа</td>
+        </tr>
+        <tr>
+          <td class="n">4</td>
+          <td>Таймаут у поставщика, который выдал код</td>
+          <td>Исход <code>unknown</code> вместо <code>failed</code>, повтор с тем же <code>request_id</code></td>
+        </tr>
+        <tr>
+          <td class="n">5</td>
+          <td>Поставщик A недоступен, fallback на B</td>
+          <td>Переход на резерв только после явного ответа A, не после его молчания</td>
+        </tr>
+        <tr>
+          <td class="n">6</td>
+          <td>Пустой остаток</td>
+          <td>Статус <code>out_of_stock</code> как рабочее ожидание, healer добивает после пополнения</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Наблюдаемость и сверка</h3>
+  <div class="prose">
+    <p>Логи структурные: одна строка — один JSON-объект с каналом и сквозными идентификаторами <code>order_id</code>, <code>event_id</code>, <code>request_id</code>. История заказа выбирается одним запросом по идентификатору.</p>
+    <p>Отчёт сверки формирует две выборки, которые в корректном состоянии системы пусты: «оплачен, но не выдан» и «выдан, но не оплачен». Журнал денежных движений ведётся двойной записью; равенство суммы проводки нулю проверяется отложенным ограничением на уровне БД.</p>
+  </div>
+</section>
+
+<footer>
+  <span>Исходники: <a href="https://github.com/Observer7203/gamer-market">github.com/Observer7203/gamer-market</a></span>
+  <span>Нагрузочный профиль — <code>docs/LOAD.txt</code></span>
+</footer>
+
+</div>
