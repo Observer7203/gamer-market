@@ -20,14 +20,12 @@ $catalog = json_decode((string) file_get_contents($root . '/data/products.json')
 $keys = json_decode((string) file_get_contents($root . '/data/keys.json'), true)['keys'];
 
 $db->transaction(function (Connection $db) use ($catalog, $keys): void {
-    $rank = count($catalog['products']);
-
     foreach ($catalog['products'] as $product) {
         $db->execute(
-            'INSERT INTO products (sku, name, type, price_minor, currency, sort_rank)
-                  VALUES (?, ?, ?, ?, ?, ?)
+            'INSERT INTO products (sku, name, type, price, currency)
+                  VALUES (?, ?, ?, ?, ?)
              ON CONFLICT (sku) DO NOTHING',
-            [$product['sku'], $product['name'], $product['type'], $product['price'], $product['currency'], $rank--]
+            [$product['sku'], $product['name'], $product['type'], $product['price'], $product['currency']]
         );
     }
 

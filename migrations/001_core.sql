@@ -1,20 +1,31 @@
 -- Каталог. SKU — естественный ключ: он же используется в контракте поставщика.
+--
+-- price — целое число в единицах валюты контракта: и каталог, и вебхук
+-- оперируют целыми рублями, дробных цен контракт не предусматривает.
+-- Хранение целым исключает погрешность двоичной дроби при сравнении сумм.
+-- Появление цен с копейками потребует перехода на минорные единицы.
+--
+-- bigint, а не integer: денежная величина встречается в products, orders,
+-- payment_events и журнале проводок. Единый тип избавляет от приведений
+-- при сравнении и суммировании, а смена типа на заполненной таблице
+-- означает её перезапись под блокировкой.
 CREATE TABLE products (
-    sku         text PRIMARY KEY,
-    name        text        NOT NULL,
-    type        text        NOT NULL,
-    price_minor bigint      NOT NULL CHECK (price_minor > 0),
-    currency    text        NOT NULL,
-    is_active   boolean     NOT NULL DEFAULT true,
-    sort_rank   integer     NOT NULL DEFAULT 0
+    sku       text PRIMARY KEY,
+    name      text    NOT NULL,
+    type      text    NOT NULL,
+    price     bigint  NOT NULL CHECK (price > 0),
+    currency  text    NOT NULL,
+    is_active boolean NOT NULL DEFAULT true
 );
 
--- Заказ. price_minor и currency скопированы из каталога на момент создания:
+-- Заказ. price и currency скопированы из каталога на момент создания:
 -- переоценка товара не должна менять сумму уже оформленного заказа.
+-- Ограничение продублировано: копирование выполняет код, и ошибка в нём
+-- не должна пройти молча.
 CREATE TABLE orders (
     id           text PRIMARY KEY,
     sku          text        NOT NULL REFERENCES products (sku),
-    price_minor  bigint      NOT NULL,
+    price        bigint      NOT NULL CHECK (price > 0),
     currency     text        NOT NULL,
     status       text        NOT NULL,
     created_at   timestamptz NOT NULL DEFAULT now(),
