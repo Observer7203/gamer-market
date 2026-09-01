@@ -26,7 +26,7 @@ final class CreateOrder
     public function __invoke(string $sku): array
     {
         $product = $this->db->selectOne(
-            'SELECT sku, price, currency FROM products WHERE sku = ? AND is_active',
+            'SELECT sku, price_minor, currency FROM products WHERE sku = ? AND is_active',
             [$sku]
         );
 
@@ -38,8 +38,8 @@ final class CreateOrder
 
         return $this->db->transaction(function (Connection $db) use ($id, $product): array {
             $db->execute(
-                'INSERT INTO orders (id, sku, price, currency, status) VALUES (?, ?, ?, ?, ?)',
-                [$id, $product['sku'], $product['price'], $product['currency'], Order::CREATED]
+                'INSERT INTO orders (id, sku, price_minor, currency, status) VALUES (?, ?, ?, ?, ?)',
+                [$id, $product['sku'], $product['price_minor'], $product['currency'], Order::CREATED]
             );
 
             // Событие оплаты могло прийти до создания заказа и остаться

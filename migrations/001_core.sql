@@ -1,31 +1,35 @@
 -- Каталог. SKU — естественный ключ: он же используется в контракте поставщика.
 --
--- price — целое число в единицах валюты контракта: и каталог, и вебхук
--- оперируют целыми рублями, дробных цен контракт не предусматривает.
--- Хранение целым исключает погрешность двоичной дроби при сравнении сумм.
--- Появление цен с копейками потребует перехода на минорные единицы.
+-- Денежные величины хранятся в минорных единицах валюты целым числом:
+-- копейки, центы. Дробное представление исключено — двоичная дробь
+-- не выражает 0.1 точно, и сравнение сумм перестаёт быть надёжным.
+-- Мажорные единицы существуют только на границах системы: контракт
+-- платёжной системы и ответ API оперируют целыми рублями, преобразование
+-- выполняет App\Domain\Money.
 --
--- bigint, а не integer: денежная величина встречается в products, orders,
--- payment_events и журнале проводок. Единый тип избавляет от приведений
--- при сравнении и суммировании, а смена типа на заполненной таблице
--- означает её перезапись под блокировкой.
+-- bigint, а не integer: int вмещает 2 147 483 647 копеек, то есть 21.4 млн
+-- рублей. Отдельной цены это ограничение не касается, но накопительные
+-- величины журнала проводок его превышают. Единый тип по всем денежным
+-- колонкам избавляет от приведений при сравнении и суммировании,
+-- а смена типа на заполненной таблице означает её перезапись
+-- под исключительной блокировкой.
 CREATE TABLE products (
-    sku       text PRIMARY KEY,
-    name      text    NOT NULL,
-    type      text    NOT NULL,
-    price     bigint  NOT NULL CHECK (price > 0),
-    currency  text    NOT NULL,
-    is_active boolean NOT NULL DEFAULT true
+    sku         text PRIMARY KEY,
+    name        text    NOT NULL,
+    type        text    NOT NULL,
+    price_minor bigint  NOT NULL CHECK (price_minor > 0),
+    currency    text    NOT NULL,
+    is_active   boolean NOT NULL DEFAULT true
 );
 
--- Заказ. price и currency скопированы из каталога на момент создания:
+-- Заказ. price_minor и currency скопированы из каталога на момент создания:
 -- переоценка товара не должна менять сумму уже оформленного заказа.
 -- Ограничение продублировано: копирование выполняет код, и ошибка в нём
 -- не должна пройти молча.
 CREATE TABLE orders (
     id           text PRIMARY KEY,
     sku          text        NOT NULL REFERENCES products (sku),
-    price        bigint      NOT NULL CHECK (price > 0),
+    price_minor  bigint      NOT NULL CHECK (price_minor > 0),
     currency     text        NOT NULL,
     status       text        NOT NULL,
     created_at   timestamptz NOT NULL DEFAULT now(),
@@ -43,7 +47,7 @@ CREATE TABLE payment_events (
     event_id     text PRIMARY KEY,
     order_id     text        NOT NULL,
     status       text        NOT NULL,
-    amount       bigint      NOT NULL,
+    amount_minor bigint      NOT NULL,
     currency     text        NOT NULL,
     occurred_at  timestamptz NOT NULL,
     received_at  timestamptz NOT NULL DEFAULT now(),

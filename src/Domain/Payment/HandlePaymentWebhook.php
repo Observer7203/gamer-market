@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Domain\Payment;
 
 use App\Database\Connection;
+use App\Domain\Money;
 
 /**
  * Обработчик вебхука платёжной системы.
@@ -30,14 +31,16 @@ final class HandlePaymentWebhook
     {
         return $this->db->transaction(function (Connection $db) use ($payload): string {
             $inserted = $db->execute(
-                'INSERT INTO payment_events (event_id, order_id, status, amount, currency, occurred_at)
+                'INSERT INTO payment_events (event_id, order_id, status, amount_minor, currency, occurred_at)
                       VALUES (?, ?, ?, ?, ?, ?)
                  ON CONFLICT (event_id) DO NOTHING',
                 [
                     $payload['event_id'],
                     $payload['order_id'],
                     $payload['status'],
-                    $payload['amount'],
+                    // Граница системы: контракт оперирует целыми рублями,
+                    // внутри всё в минорных единицах.
+                    Money::toMinor((int) $payload['amount']),
                     $payload['currency'],
                     $payload['created_at'],
                 ]

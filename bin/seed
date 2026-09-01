@@ -4,6 +4,7 @@
 declare(strict_types=1);
 
 use App\Database\Connection;
+use App\Domain\Money;
 use App\Support\Container;
 
 /**
@@ -22,10 +23,16 @@ $keys = json_decode((string) file_get_contents($root . '/data/keys.json'), true)
 $db->transaction(function (Connection $db) use ($catalog, $keys): void {
     foreach ($catalog['products'] as $product) {
         $db->execute(
-            'INSERT INTO products (sku, name, type, price, currency)
+            'INSERT INTO products (sku, name, type, price_minor, currency)
                   VALUES (?, ?, ?, ?, ?)
              ON CONFLICT (sku) DO NOTHING',
-            [$product['sku'], $product['name'], $product['type'], $product['price'], $product['currency']]
+            [
+                $product['sku'],
+                $product['name'],
+                $product['type'],
+                Money::toMinor((int) $product['price']),
+                $product['currency'],
+            ]
         );
     }
 
