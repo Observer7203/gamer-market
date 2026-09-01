@@ -56,7 +56,7 @@ final class ApplyPaymentEvents
             return $this->finish($event, 'order_not_found', processed: false);
         }
 
-        if ((int) $event['amount'] !== (int) $order['price_minor'] || $event['currency'] !== $order['currency']) {
+        if ((int) $event['amount'] !== (int) $order['price'] || $event['currency'] !== $order['currency']) {
             // Расхождение суммы разбирается человеком через сверку.
             // Ответ платёжной системе всё равно успешный: повтор его не исправит.
             return $this->finish($event, 'amount_mismatch');

@@ -55,7 +55,7 @@ final class OrderController
         $body = [
             'order_id'   => $order['id'],
             'sku'        => $order['sku'],
-            'amount'     => (int) $order['price_minor'],
+            'amount'     => (int) $order['price'],
             'currency'   => $order['currency'],
             'status'     => $order['status'],
             'created_at' => $order['created_at'],
