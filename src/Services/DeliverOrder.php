@@ -13,16 +13,15 @@ use App\Support\Logger;
  * Выдача товара по оплаченному заказу.
  *
  * Обращение к поставщику вынесено между двумя транзакциями: удерживать
- * блокировку строки заказа на время сетевого вызова недопустимо.
+ * блокировку строки на время сетевого вызова недопустимо.
  *
  * Первая транзакция занимает слот выдачи, вторая записывает результат.
- * Слот занимается условным UPDATE: если строка уже в работе или выдана,
- * затронуто ноль строк и второй исполнитель прекращает работу.
+ * Исполнителя определяет условное обновление строки выдачи: ноль затронутых
+ * строк означает, что работу ведёт кто-то другой.
  *
- * Обе транзакции берут блокировки в одном порядке — заказ, затем выдача.
- * Обратный порядок во второй транзакции приводил к взаимной блокировке:
- * один процесс удерживал строку выдачи и ждал строку заказа, другой —
- * наоборот.
+ * Обе транзакции изменяют строки в одном порядке — выдача, затем заказ.
+ * Явных блокировок чтением здесь нет: очередь ожидания на одной строке
+ * при полусотне исполнителей приводила к взаимным блокировкам.
  */
 final class DeliverOrder
 {
@@ -54,23 +53,21 @@ final class DeliverOrder
     /**
      * Занять слот выдачи и перевести заказ в delivering.
      *
+     * Явной блокировки строки заказа здесь нет. Пятьдесят исполнителей,
+     * одновременно запросивших SELECT ... FOR UPDATE по одной строке,
+     * образуют очередь ожидания, при переупорядочивании которой PostgreSQL
+     * замыкает цикл через блокировки кортежа и прерывает транзакции.
+     *
+     * Вместо этого решение принимает один оператор: условное обновление
+     * строки выдачи с присоединением заказа. Ноль затронутых строк означает,
+     * что работу уже ведёт другой исполнитель либо заказ в конечном
+     * состоянии. Оператор атомарен, очередь ожидания не образуется.
+     *
      * @return array{sku: string, request_id: string}|null
      */
     private function claim(string $orderId): ?array
     {
         return $this->db->transaction(function (Connection $db) use ($orderId): ?array {
-            $row = $db->selectOne('SELECT * FROM orders WHERE id = ? FOR UPDATE', [$orderId]);
-
-            if ($row === null) {
-                return null;
-            }
-
-            $order = Order::fromRow($row);
-
-            if ($order->isFinal()) {
-                return null;
-            }
-
             // request_id детерминирован: повтор обращается к тому же запросу
             // у поставщика и получает тот же код, а не новый.
             $requestId = 'req_' . $orderId . '_' . self::PROVIDER;
@@ -81,26 +78,38 @@ final class DeliverOrder
                 [$orderId, Delivery::PENDING]
             );
 
-            $taken = $db->execute(
-                'UPDATE deliveries
-                    SET status = ?, attempts = attempts + 1,
+            $claimed = $db->selectOne(
+                'UPDATE deliveries d
+                    SET status = ?, attempts = d.attempts + 1,
                         provider = ?, request_id = ?
-                  WHERE order_id = ? AND status IN (?, ?, ?)',
+                   FROM orders o
+                  WHERE d.order_id = ? AND o.id = d.order_id
+                    AND d.status IN (?, ?, ?)
+                    AND o.status NOT IN (?, ?)
+              RETURNING o.sku',
                 [
                     Delivery::IN_FLIGHT, self::PROVIDER, $requestId, $orderId,
                     Delivery::PENDING, Delivery::FAILED, Delivery::OUT_OF_STOCK,
+                    Order::DELIVERED, Order::PAYMENT_FAILED,
                 ]
             );
 
-            if ($taken === 0) {
+            if ($claimed === null) {
                 return null;
             }
 
-            if ($order->canTransitionTo(Order::DELIVERING)) {
-                $db->execute('UPDATE orders SET status = ? WHERE id = ?', [Order::DELIVERING, $orderId]);
-            }
+            // Переход в delivering выполняется условием в самом операторе:
+            // отдельная проверка состояния потребовала бы чтения строки,
+            // а вместе с ним и блокировки.
+            $db->execute(
+                'UPDATE orders SET status = ? WHERE id = ? AND status IN (?, ?, ?)',
+                [
+                    Order::DELIVERING, $orderId,
+                    Order::PAID, Order::OUT_OF_STOCK, Order::DELIVERY_FAILED,
+                ]
+            );
 
-            return ['sku' => $order->sku, 'request_id' => $requestId];
+            return ['sku' => (string) $claimed['sku'], 'request_id' => $requestId];
         });
     }
 
@@ -108,11 +117,9 @@ final class DeliverOrder
     private function store(string $orderId, string $requestId, array $response): string
     {
         return $this->db->transaction(function (Connection $db) use ($orderId, $requestId, $response): string {
-            // Порядок блокировок совпадает с порядком в claim: сначала заказ,
-            // затем выдача. Обратный порядок здесь приводил к взаимной
+            // Порядок изменения строк совпадает с порядком в claim: сначала
+            // выдача, затем заказ. Расхождение порядка приводило к взаимной
             // блокировке при конкурентных исполнителях.
-            $db->selectOne('SELECT id FROM orders WHERE id = ? FOR UPDATE', [$orderId]);
-
             if ($response['outcome'] === 'ok') {
                 $db->execute(
                     'UPDATE deliveries SET status = ?, code = ?, last_error = NULL,
