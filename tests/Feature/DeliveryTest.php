@@ -20,7 +20,7 @@ final class DeliveryTest extends TestCase
         $response = $this->request('GET', '/api/orders/' . $order['order_id']);
 
         self::assertSame(Order::DELIVERED, $response->body['status']);
-        self::assertMatchesRegularExpression('/^TEST-\d{4}-CODE$/', $response->body['delivery']['code']);
+        self::assertMatchesRegularExpression('/^[ab]-TEST-\d{4}$/', $response->body['delivery']['code']);
         self::assertNotEmpty($response->body['delivery']['delivered_at']);
     }
 
@@ -55,6 +55,10 @@ final class DeliveryTest extends TestCase
 
     public function testПустойОстатокВосстановим(): void
     {
+        // Резервный поставщик тоже без товара: иначе заказ ушёл бы к нему.
+        $this->container->get(\App\Services\ProviderStub::class)
+            ->configure('b', \App\Services\ProviderStub::OUT_OF_STOCK, 0.0, 0.0, 1);
+
         // На складе три кода, четвёртому заказу товара не хватит
         for ($i = 0; $i < 3; $i++) {
             $order = $this->createOrder();
@@ -79,13 +83,13 @@ final class DeliveryTest extends TestCase
         // После пополнения склада повтор доводит заказ до выдачи
         $this->db->execute(
             'INSERT INTO provider_stock (provider, sku, code) VALUES (?, ?, ?)',
-            ['a', 'KEY-GTA5', 'TEST-9999-CODE']
+            ['a', 'KEY-GTA5', 'a-TEST-9999']
         );
         $this->db->execute('UPDATE jobs SET run_at = now() WHERE id = ?', [$job['id']]);
         $this->runWorker();
 
         self::assertSame(Order::DELIVERED, $this->orderStatus($order['order_id']));
-        self::assertSame('TEST-9999-CODE', $this->request('GET', '/api/orders/' . $order['order_id'])
+        self::assertSame('a-TEST-9999', $this->request('GET', '/api/orders/' . $order['order_id'])
             ->body['delivery']['code']);
     }
 

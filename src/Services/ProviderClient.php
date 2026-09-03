@@ -13,9 +13,16 @@ namespace App\Services;
  */
 interface ProviderClient
 {
+    public const OK      = 'ok';
+    public const ERROR   = 'error';
+    public const UNKNOWN = 'unknown';
+
     /**
+     * Исход unknown означает отсутствие ответа. Он не равнозначен отказу:
+     * поставщик мог выдать код, а ответ не дойти. Различение этих случаев —
+     * условие того, что повтор не приведёт к повторной выдаче.
+     *
      * @return array{outcome: string, code: ?string, reason: ?string, http: int, latency_ms: int}
-     *         outcome: ok | error | timeout
      */
-    public function issue(string $requestId, string $sku, string $orderId): array;
+    public function issue(string $provider, string $requestId, string $sku, string $orderId): array;
 }

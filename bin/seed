@@ -36,21 +36,31 @@ $db->transaction(function (Connection $db) use ($catalog, $keys): void {
         );
     }
 
-    // Коды распределяются по артикулам по кругу: у каждого товара
-    // оказывается несколько экземпляров на складе поставщика.
+    // Склад каждого поставщика заполняется независимо: один и тот же код
+    // у разных поставщиков — разные экземпляры товара, как и в жизни.
+    // Коды распределяются по артикулам по кругу.
     $skus = array_column($catalog['products'], 'sku');
 
-    foreach ($keys as $i => $code) {
+    foreach (['a', 'b'] as $provider) {
+        foreach ($keys as $i => $code) {
+            $db->execute(
+                'INSERT INTO provider_stock (provider, sku, code) VALUES (?, ?, ?)
+                 ON CONFLICT (provider, code) DO NOTHING',
+                [$provider, $skus[$i % count($skus)], $provider . '-' . $code]
+            );
+        }
+
         $db->execute(
-            'INSERT INTO provider_stock (provider, sku, code) VALUES (?, ?, ?)
-             ON CONFLICT (provider, code) DO NOTHING',
-            ['a', $skus[$i % count($skus)], $code]
+            'INSERT INTO provider_settings (provider, mode) VALUES (?, ?)
+             ON CONFLICT (provider) DO NOTHING',
+            [$provider, 'ok']
         );
     }
 });
 
 printf(
-    "каталог: %d позиций, склад поставщика a: %d кодов\n",
+    "каталог: %d позиций, склад поставщика a: %d кодов, поставщика b: %d кодов\n",
     (int) $db->selectOne('SELECT count(*) AS n FROM products')['n'],
-    (int) $db->selectOne('SELECT count(*) AS n FROM provider_stock')['n'],
+    (int) $db->selectOne("SELECT count(*) AS n FROM provider_stock WHERE provider = 'a'")['n'],
+    (int) $db->selectOne("SELECT count(*) AS n FROM provider_stock WHERE provider = 'b'")['n'],
 );
