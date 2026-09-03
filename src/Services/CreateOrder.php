@@ -7,6 +7,7 @@ namespace App\Services;
 use App\Database\Connection;
 use App\Exceptions\ProductNotFound;
 use App\Models\Order;
+use App\Support\Logger;
 
 /**
  * Создание заказа по артикулу.
@@ -20,6 +21,7 @@ final class CreateOrder
     public function __construct(
         private readonly Connection $db,
         private readonly ApplyPaymentEvents $applyPaymentEvents,
+        private readonly Logger $logger,
     ) {
     }
 
@@ -46,7 +48,17 @@ final class CreateOrder
             // необработанным. Применяем его здесь же, в той же транзакции.
             ($this->applyPaymentEvents)($id);
 
-            return Order::fromRow($db->selectOne('SELECT * FROM orders WHERE id = ?', [$id]) ?? []);
+            $order = Order::fromRow($db->selectOne('SELECT * FROM orders WHERE id = ?', [$id]) ?? []);
+
+            $this->logger->info('order_created', [
+                'order_id'     => $order->id,
+                'sku'          => $order->sku,
+                'amount_minor' => $order->priceMinor,
+                'currency'     => $order->currency,
+                'status'       => $order->status,
+            ]);
+
+            return $order;
         });
     }
 }
