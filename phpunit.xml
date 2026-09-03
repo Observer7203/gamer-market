@@ -14,6 +14,11 @@
         <testsuite name="feature">
             <directory>tests/Feature</directory>
         </testsuite>
+        <!-- Требует поднятого окружения: параллельность создаётся
+             настоящими соединениями и процессами -->
+        <testsuite name="concurrency">
+            <directory>tests/Concurrency</directory>
+        </testsuite>
     </testsuites>
 
     <source>

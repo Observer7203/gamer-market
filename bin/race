@@ -1,0 +1,313 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+use App\Database\Connection;
+use App\Services\DeliverOrder;
+use App\Support\Container;
+
+/**
+ * Воспроизводимая проверка exactly-once под конкуренцией.
+ *
+ * Прогоняет сценарий заданное число раз и после каждого прогона проверяет
+ * инварианты. Ненулевой код возврата означает нарушение хотя бы одного.
+ *
+ *   php bin/race
+ *   php bin/race --parallel=50 --repeat=20
+ *   php bin/race --mode=same        одинаковый event_id: проверяет дедупликацию
+ *   php bin/race --mode=different   разные event_id: проверяет блокировку заказа
+ *   php bin/race --mode=workers     конкурирующие исполнители выдачи
+ *   php bin/race --mode=all         все три режима подряд
+ */
+
+/** @var Container $container */
+$container = require dirname(__DIR__) . '/src/bootstrap.php';
+$db = $container->get(Connection::class);
+
+$options = getopt('', ['parallel::', 'repeat::', 'mode::', 'url::', 'sku::']);
+
+$parallel = max(2, (int) ($options['parallel'] ?? 50));
+$repeat   = max(1, (int) ($options['repeat'] ?? 10));
+$sku      = $options['sku'] ?? 'KEY-GTA5';
+$base     = rtrim($options['url'] ?? (getenv('APP_URL') ?: 'http://nginx'), '/');
+$modes    = ($options['mode'] ?? 'all') === 'all'
+    ? ['same', 'different', 'workers']
+    : [$options['mode'] ?? 'different'];
+
+$titles = [
+    'same'      => 'одинаковый event_id — дедупликация события',
+    'different' => 'разные event_id — блокировка строки заказа',
+    'workers'   => 'конкурирующие исполнители выдачи',
+];
+
+printf("Проверка exactly-once\n");
+printf("  параллельных запросов: %d\n", $parallel);
+printf("  повторов сценария:     %d\n", $repeat);
+printf("  артикул:               %s\n\n", $sku);
+
+$failed = 0;
+$checks = 0;
+
+foreach ($modes as $mode) {
+    printf("── %s\n", $titles[$mode] ?? $mode);
+
+    for ($run = 1; $run <= $repeat; $run++) {
+        ensureStock($db, $sku, $parallel + 5);
+
+        $orderId = createOrder($base, $sku);
+        $startedAt = microtime(true);
+
+        $outcomes = $mode === 'workers'
+            ? raceWorkers($container, $base, $orderId, $parallel)
+            : raceWebhooks($base, $orderId, $parallel, $mode === 'same');
+
+        drainQueue($container);
+        waitForSettle($db, $orderId);
+
+        $result = inspect($db, $orderId, $parallel, $mode);
+        $checks += count($result['checks']);
+        $broken = array_filter($result['checks'], static fn (bool $ok): bool => !$ok);
+
+        if ($broken !== []) {
+            $failed++;
+            printf("  %2d/%d  НАРУШЕНО за %d мс\n", $run, $repeat, ms($startedAt));
+            foreach ($broken as $name => $_) {
+                printf("         %s\n", $name);
+            }
+            printf("         факт: %s\n", json_encode($result['facts'], JSON_UNESCAPED_UNICODE));
+            printf("         исходы: %s\n", json_encode($outcomes, JSON_UNESCAPED_UNICODE));
+        } else {
+            printf("  %2d/%d  ок за %4d мс   %s\n", $run, $repeat, ms($startedAt),
+                json_encode($outcomes, JSON_UNESCAPED_UNICODE));
+        }
+    }
+
+    echo "\n";
+}
+
+printf("Проверок: %d, нарушений: %d\n", $checks, $failed);
+exit($failed === 0 ? 0 : 1);
+
+
+// ── сценарии ────────────────────────────────────────────────────────────────
+
+/**
+ * Одновременная доставка вебхука в N копий.
+ *
+ * curl_multi открывает все соединения сразу, поэтому запросы попадают
+ * в разные процессы php-fpm и действительно конкурируют.
+ *
+ * @return array<string, int>
+ */
+function raceWebhooks(string $base, string $orderId, int $parallel, bool $sameEvent): array
+{
+    $sharedEvent = 'evt_' . bin2hex(random_bytes(6));
+    $multi = curl_multi_init();
+    $handles = [];
+
+    for ($i = 0; $i < $parallel; $i++) {
+        $payload = json_encode([
+            'event_id'   => $sameEvent ? $sharedEvent : sprintf('%s_%d', $sharedEvent, $i),
+            'order_id'   => $orderId,
+            'status'     => 'paid',
+            'amount'     => 1990,
+            'currency'   => 'RUB',
+            'created_at' => gmdate('Y-m-d\TH:i:s\Z'),
+        ], JSON_UNESCAPED_UNICODE);
+
+        $ch = curl_init($base . '/api/webhooks/payment');
+        curl_setopt_array($ch, [
+            CURLOPT_POST           => true,
+            CURLOPT_POSTFIELDS     => $payload,
+            CURLOPT_HTTPHEADER     => ['Content-Type: application/json'],
+            CURLOPT_RETURNTRANSFER => true,
+        ]);
+        curl_multi_add_handle($multi, $ch);
+        $handles[] = $ch;
+    }
+
+    do {
+        curl_multi_exec($multi, $running);
+        curl_multi_select($multi, 0.05);
+    } while ($running > 0);
+
+    $outcomes = [];
+    foreach ($handles as $ch) {
+        $body = json_decode((string) curl_multi_getcontent($ch), true);
+        $key = is_array($body) ? ($body['outcome'] ?? $body['error']['code'] ?? '?') : 'нет ответа';
+        $outcomes[$key] = ($outcomes[$key] ?? 0) + 1;
+        curl_multi_remove_handle($multi, $ch);
+        curl_close($ch);
+    }
+    curl_multi_close($multi);
+
+    return $outcomes;
+}
+
+/**
+ * Конкурирующие исполнители выдачи.
+ *
+ * Заказ переводится в оплаченный обычным вебхуком, после чего N процессов
+ * одновременно пытаются выполнить выдачу — так воспроизводится ситуация,
+ * когда задачу подхватил второй воркер после истечения срока удержания.
+ *
+ * @return array<string, int>
+ */
+function raceWorkers(Container $container, string $base, string $orderId, int $parallel): array
+{
+    raceWebhooks($base, $orderId, 1, true);
+
+    $sockets = [];
+    $children = [];
+
+    for ($i = 0; $i < $parallel; $i++) {
+        $pair = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
+        $pid = pcntl_fork();
+
+        if ($pid === 0) {
+            fclose($pair[0]);
+
+            // Дочернему процессу нужно собственное подключение: сокет
+            // родителя унаследован и одновременное использование его портит.
+            $child = require dirname(__DIR__) . '/src/bootstrap.php';
+            $outcome = ($child->get(DeliverOrder::class))($orderId);
+            fwrite($pair[1], $outcome);
+            fclose($pair[1]);
+
+            // Завершение без деструкторов: обычный выход закрыл бы
+            // унаследованный сокет родителя.
+            posix_kill(getmypid(), SIGKILL);
+        }
+
+        fclose($pair[1]);
+        $sockets[] = $pair[0];
+        $children[] = $pid;
+    }
+
+    $outcomes = [];
+    foreach ($sockets as $socket) {
+        $outcome = trim((string) stream_get_contents($socket)) ?: '?';
+        $outcomes[$outcome] = ($outcomes[$outcome] ?? 0) + 1;
+        fclose($socket);
+    }
+    foreach ($children as $pid) {
+        pcntl_waitpid($pid, $status);
+    }
+
+    return $outcomes;
+}
+
+
+// ── проверки ────────────────────────────────────────────────────────────────
+
+/**
+ * @return array{checks: array<string, bool>, facts: array<string, mixed>}
+ */
+function inspect(Connection $db, string $orderId, int $parallel, string $mode): array
+{
+    $facts = [
+        'событий'  => count($db->select('SELECT 1 FROM payment_events WHERE order_id = ?', [$orderId])),
+        'applied'  => count($db->select(
+            "SELECT 1 FROM payment_events WHERE order_id = ? AND outcome = 'applied'", [$orderId]
+        )),
+        'выдач'    => count($db->select('SELECT 1 FROM deliveries WHERE order_id = ?', [$orderId])),
+        'выдано'   => count($db->select(
+            "SELECT 1 FROM deliveries WHERE order_id = ? AND status = 'delivered'", [$orderId]
+        )),
+        'кодов'    => count($db->select(
+            'SELECT 1 FROM provider_stock WHERE request_id LIKE ?', ['%' . $orderId . '%']
+        )),
+        'статус'   => $db->selectOne('SELECT status FROM orders WHERE id = ?', [$orderId])['status'] ?? '?',
+    ];
+
+    $expectedEvents = $mode === 'same' ? 1 : ($mode === 'workers' ? 1 : $parallel);
+
+    return [
+        'facts'  => $facts,
+        'checks' => [
+            'ровно одна выдача на заказ'          => $facts['выдач'] === 1,
+            'выдача завершена'                    => $facts['выдано'] === 1,
+            'ровно один код списан со склада'     => $facts['кодов'] === 1,
+            'заказ в состоянии delivered'         => $facts['статус'] === 'delivered',
+            'ровно одно событие применено'        => $facts['applied'] === 1,
+            'ни одно событие не потеряно'         => $facts['событий'] === $expectedEvents,
+        ],
+    ];
+}
+
+
+// ── вспомогательное ─────────────────────────────────────────────────────────
+
+function createOrder(string $base, string $sku): string
+{
+    $ch = curl_init($base . '/api/orders');
+    curl_setopt_array($ch, [
+        CURLOPT_POST           => true,
+        CURLOPT_POSTFIELDS     => json_encode(['sku' => $sku]),
+        CURLOPT_HTTPHEADER     => ['Content-Type: application/json'],
+        CURLOPT_RETURNTRANSFER => true,
+    ]);
+    $body = json_decode((string) curl_exec($ch), true);
+    curl_close($ch);
+
+    if (!isset($body['order_id'])) {
+        fwrite(STDERR, "Не удалось создать заказ: " . json_encode($body, JSON_UNESCAPED_UNICODE) . "\n");
+        exit(2);
+    }
+
+    return (string) $body['order_id'];
+}
+
+/** Держит на складе достаточный запас, чтобы проверка не упиралась в остаток. */
+function ensureStock(Connection $db, string $sku, int $minimum): void
+{
+    $free = count($db->select(
+        'SELECT 1 FROM provider_stock WHERE sku = ? AND request_id IS NULL', [$sku]
+    ));
+
+    for ($i = $free; $i < $minimum; $i++) {
+        $db->execute(
+            'INSERT INTO provider_stock (provider, sku, code) VALUES (?, ?, ?)
+             ON CONFLICT (provider, code) DO NOTHING',
+            ['a', $sku, 'RACE-' . bin2hex(random_bytes(5))]
+        );
+    }
+}
+
+/**
+ * Ожидание конечного состояния заказа.
+ *
+ * Выдача выполняется асинхронно, и задачу мог забрать фоновый воркер
+ * в отдельном контейнере. Проверка инвариантов имеет смысл только после
+ * того, как заказ пришёл в состояние покоя.
+ */
+function waitForSettle(Connection $db, string $orderId, float $timeoutSeconds = 10.0): void
+{
+    $deadline = microtime(true) + $timeoutSeconds;
+
+    while (microtime(true) < $deadline) {
+        $status = $db->selectOne('SELECT status FROM orders WHERE id = ?', [$orderId])['status'] ?? '';
+
+        if (!in_array($status, ['paid', 'delivering'], true)) {
+            return;
+        }
+
+        usleep(50_000);
+    }
+}
+
+/** Выполняет накопившиеся задачи, чтобы проверка не зависела от фонового воркера. */
+function drainQueue(Container $container): void
+{
+    $worker = $container->get(App\Queue\Worker::class);
+
+    for ($i = 0; $i < 200 && $worker->tick(); $i++) {
+        // задачи обрабатываются по одной
+    }
+}
+
+function ms(float $startedAt): int
+{
+    return (int) round((microtime(true) - $startedAt) * 1000);
+}
