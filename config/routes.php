@@ -23,4 +23,8 @@ return static function (Router $router): void {
     // Заглушка поставщика: отдельный сервис, размещённый в том же приложении
     // ради простоты запуска.
     $router->post('/stubs/provider-{provider}/issue', [ProviderStubController::class, 'issue']);
+
+    // Служебный маршрут: задаёт поведение заглушки для воспроизводимых
+    // сценариев отказа и неответа.
+    $router->post('/stubs/provider-{provider}/behavior', [ProviderStubController::class, 'behavior']);
 };

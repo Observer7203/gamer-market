@@ -35,14 +35,15 @@ abstract class TestCase extends BaseTestCase
         );
 
         $this->db->raw(
-            'TRUNCATE deliveries, jobs, payment_events, orders, provider_stock, products
+            'TRUNCATE delivery_attempts, deliveries, jobs, payment_events, orders,
+                      provider_stock, provider_settings, products
              RESTART IDENTITY CASCADE'
         );
 
         $this->seedCatalog();
     }
 
-    /** Один товар за 1990 и три кода на складе поставщика. */
+    /** Один товар за 1990 и по несколько кодов на складе каждого поставщика. */
     protected function seedCatalog(int $codes = 3): void
     {
         $this->db->execute(
@@ -50,10 +51,17 @@ abstract class TestCase extends BaseTestCase
             ['KEY-GTA5', 'GTA V ключ активации', 'key', 199000, 'RUB']
         );
 
-        for ($i = 1; $i <= $codes; $i++) {
+        foreach (['a', 'b'] as $provider) {
+            for ($i = 1; $i <= $codes; $i++) {
+                $this->db->execute(
+                    'INSERT INTO provider_stock (provider, sku, code) VALUES (?, ?, ?)',
+                    [$provider, 'KEY-GTA5', sprintf('%s-TEST-%04d', $provider, $i)]
+                );
+            }
+
             $this->db->execute(
-                'INSERT INTO provider_stock (provider, sku, code) VALUES (?, ?, ?)',
-                ['a', 'KEY-GTA5', sprintf('TEST-%04d-CODE', $i)]
+                'INSERT INTO provider_settings (provider, mode) VALUES (?, ?)',
+                [$provider, 'ok']
             );
         }
     }

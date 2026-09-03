@@ -16,6 +16,13 @@ final class Delivery
     public const FAILED       = 'failed';
     public const OUT_OF_STOCK = 'out_of_stock';
 
+    /**
+     * Ответа от поставщика не было. Отличается от failed тем, что переключение
+     * на резервного поставщика из этого состояния запрещено: код мог быть
+     * выдан, и вторая выдача создала бы дубликат.
+     */
+    public const UNRESOLVED = 'unresolved';
+
     private function __construct(
         public readonly string $orderId,
         public readonly string $status,
@@ -24,6 +31,7 @@ final class Delivery
         public readonly ?string $code,
         public readonly int $attempts,
         public readonly ?string $lastError,
+        public readonly ?string $unresolvedProvider,
         public readonly ?string $deliveredAt,
     ) {
     }
@@ -39,6 +47,7 @@ final class Delivery
             isset($row['code']) ? (string) $row['code'] : null,
             (int) ($row['attempts'] ?? 0),
             isset($row['last_error']) ? (string) $row['last_error'] : null,
+            isset($row['unresolved_provider']) ? (string) $row['unresolved_provider'] : null,
             isset($row['delivered_at']) ? (string) $row['delivered_at'] : null,
         );
     }
@@ -46,5 +55,10 @@ final class Delivery
     public function isDelivered(): bool
     {
         return $this->status === self::DELIVERED;
+    }
+
+    public function isUnresolved(): bool
+    {
+        return $this->status === self::UNRESOLVED;
     }
 }

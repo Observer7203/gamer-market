@@ -38,13 +38,14 @@ curl http://localhost:8080/health
 docker compose exec app vendor/bin/phpunit
 ```
 
-61 тест на отдельной базе `gamer_market_test`. Данные разработки
+69 тестов на отдельной базе `gamer_market_test`. Данные разработки
 не затрагиваются.
 
-Проверка exactly-once под конкуренцией:
+Проверка exactly-once под конкуренцией и устойчивости интеграций:
 
 ```bash
 docker compose exec app php bin/race --parallel=50 --repeat=20
+docker compose exec app php bin/failover --repeat=3
 ```
 
 ## Проверка вручную
@@ -69,7 +70,7 @@ curl http://localhost:8080/api/orders/ord_...
 ## Структура
 
 ```
-bin/            точки входа CLI: migrate, seed, worker, pay, race
+bin/            точки входа CLI: migrate, seed, worker, pay, race, failover
 config/         config.php (единственный читатель окружения), routes.php
 data/           каталог товаров и пул ключей
 docker/         nginx + php-fpm
@@ -109,7 +110,7 @@ tests/
 - [x] **0.** Скелет: контейнер, конфиг, роутер, PDO-слой, миграции, docker
 - [x] **1.** Ядро API: заказ по SKU, чтение заказа, вебхук оплаты, авто-выдача
 - [x] **2.** Exactly-once под гонками, тест на 50 параллельных вебхуков
-- [ ] **3.** Два поставщика, таймауты, бэкофф, fallback A→B, обработка `unknown`
+- [x] **3.** Два поставщика, таймауты, бэкофф, fallback A→B, обработка `unknown`
 - [ ] **4.** Структурные логи, сверка, healer зависших заказов, журнал денег
 - [ ] **5.** Каталог под нагрузкой: схема, индексы, план выполнения
 
@@ -120,6 +121,8 @@ tests/
   машина состояний, схема данных
 - **[Схема данных](docs/SCHEMA.txt)** — принятые решения, инварианты
   и что схема запрещает физически
+- **[Проверка этапа 3](docs/CHECK_STAGE_3.txt)** — два поставщика, повторы,
+  переключение на резервного, обработка отсутствия ответа
 - **[Проверка этапа 2](docs/CHECK_STAGE_2.txt)** — exactly-once под
   конкуренцией: запуск `bin/race`, ручной прогон, разбор устранённых
   взаимных блокировок

@@ -39,4 +39,41 @@ final class ProviderStubController
             $result['reason'] === 'out_of_stock' ? 409 : 500
         );
     }
+
+    /**
+     * Управление поведением заглушки.
+     *
+     * Служебный маршрут: позволяет воспроизводить отказы и неответы
+     * детерминированно, не изменяя код и не перезапуская окружение.
+     */
+    public function behavior(Request $request): Response
+    {
+        $provider = $request->attribute('provider');
+        $mode = $request->input('mode', ProviderStub::RANDOM);
+
+        $allowed = [
+            ProviderStub::RANDOM, ProviderStub::OK, ProviderStub::ERROR,
+            ProviderStub::OUT_OF_STOCK, ProviderStub::TIMEOUT, ProviderStub::ISSUE_THEN_TIMEOUT,
+        ];
+
+        if (!in_array($mode, $allowed, true)) {
+            return Response::error('invalid_request', 'Допустимые режимы: ' . implode(', ', $allowed), 400);
+        }
+
+        $this->stub->configure(
+            $provider,
+            (string) $mode,
+            (float) $request->input('fail_rate', 0),
+            (float) $request->input('timeout_rate', 0),
+            (int) $request->input('hang_seconds', 5),
+        );
+
+        return Response::json([
+            'provider'     => $provider,
+            'mode'         => $mode,
+            'fail_rate'    => (float) $request->input('fail_rate', 0),
+            'timeout_rate' => (float) $request->input('timeout_rate', 0),
+            'hang_seconds' => (int) $request->input('hang_seconds', 5),
+        ]);
+    }
 }

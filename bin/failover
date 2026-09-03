@@ -1,0 +1,342 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+use App\Database\Connection;
+use App\Support\Container;
+
+/**
+ * Воспроизводимая проверка устойчивости интеграций.
+ *
+ * Прогоняет сценарии отказа и неответа поставщиков, после каждого проверяет
+ * ожидаемое состояние. Ненулевой код возврата означает нарушение.
+ *
+ *   php bin/failover
+ *   php bin/failover --scenario=trap
+ *   php bin/failover --repeat=3
+ */
+
+/** @var Container $container */
+$container = require dirname(__DIR__) . '/src/bootstrap.php';
+$db = $container->get(Connection::class);
+
+$options  = getopt('', ['scenario::', 'repeat::', 'url::', 'sku::']);
+$repeat   = max(1, (int) ($options['repeat'] ?? 1));
+$sku      = $options['sku'] ?? 'KEY-GTA5';
+$base     = rtrim($options['url'] ?? (getenv('APP_URL') ?: 'http://nginx'), '/');
+$only     = $options['scenario'] ?? null;
+
+$scenarios = [
+    'healthy'   => ['оба поставщика отвечают', 'healthy'],
+    'fallback'  => ['A отказывает, переключение на B', 'fallback'],
+    'empty'     => ['у A пусто, переключение на B', 'emptyStock'],
+    'trap'      => ['A выдал код, ответ не дошёл', 'trap'],
+    'both_down' => ['оба недоступны, затем восстановление', 'bothDown'],
+];
+
+printf("Проверка устойчивости интеграций\n  артикул: %s\n  повторов: %d\n\n", $sku, $repeat);
+
+$failed = 0;
+$checks = 0;
+
+foreach ($scenarios as $name => [$title, $handler]) {
+    if ($only !== null && $only !== $name) {
+        continue;
+    }
+
+    printf("── %s\n", $title);
+
+    for ($run = 1; $run <= $repeat; $run++) {
+        ensureStock($db, $sku, 5);
+        $result = $handler($container, $db, $base, $sku);
+
+        $checks += count($result['checks']);
+        $broken = array_filter($result['checks'], static fn (bool $ok): bool => !$ok);
+
+        if ($broken !== []) {
+            $failed++;
+            printf("  %d/%d  НАРУШЕНО\n", $run, $repeat);
+            foreach (array_keys($broken) as $check) {
+                printf("        %s\n", $check);
+            }
+            printf("        факт: %s\n", json_encode($result['facts'], JSON_UNESCAPED_UNICODE));
+        } else {
+            printf("  %d/%d  ок   %s\n", $run, $repeat, json_encode($result['facts'], JSON_UNESCAPED_UNICODE));
+        }
+    }
+
+    echo "\n";
+}
+
+behavior($base, 'a', 'ok');
+behavior($base, 'b', 'ok');
+
+printf("Проверок: %d, нарушений: %d\n", $checks, $failed);
+exit($failed === 0 ? 0 : 1);
+
+
+// ── сценарии ────────────────────────────────────────────────────────────────
+
+/** @return array{checks: array<string, bool>, facts: array<string, mixed>} */
+function healthy(Container $c, Connection $db, string $base, string $sku): array
+{
+    behavior($base, 'a', 'ok');
+    behavior($base, 'b', 'ok');
+
+    $orderId = payFor($c, $base, $sku);
+    $state = inspect($db, $orderId);
+
+    return [
+        'facts'  => $state,
+        'checks' => [
+            'заказ выдан'              => $state['статус'] === 'delivered',
+            'выдал основной поставщик' => $state['поставщик'] === 'a',
+            'списан ровно один код'    => $state['кодов'] === 1,
+        ],
+    ];
+}
+
+/** @return array{checks: array<string, bool>, facts: array<string, mixed>} */
+function fallback(Container $c, Connection $db, string $base, string $sku): array
+{
+    behavior($base, 'a', 'error');
+    behavior($base, 'b', 'ok');
+
+    $orderId = payFor($c, $base, $sku);
+    $state = inspect($db, $orderId);
+
+    return [
+        'facts'  => $state,
+        'checks' => [
+            'заказ выдан'                    => $state['статус'] === 'delivered',
+            'выдал резервный поставщик'      => $state['поставщик'] === 'b',
+            'списан ровно один код'          => $state['кодов'] === 1,
+            'у основного код не списан'      => $state['кодов_a'] === 0,
+            'повторов к отказавшему не было' => $state['попыток_a'] === 1,
+        ],
+    ];
+}
+
+/** @return array{checks: array<string, bool>, facts: array<string, mixed>} */
+function emptyStock(Container $c, Connection $db, string $base, string $sku): array
+{
+    behavior($base, 'a', 'out_of_stock');
+    behavior($base, 'b', 'ok');
+
+    $orderId = payFor($c, $base, $sku);
+    $state = inspect($db, $orderId);
+
+    return [
+        'facts'  => $state,
+        'checks' => [
+            'заказ выдан'               => $state['статус'] === 'delivered',
+            'выдал резервный поставщик' => $state['поставщик'] === 'b',
+            'списан ровно один код'     => $state['кодов'] === 1,
+        ],
+    ];
+}
+
+/**
+ * Ключевой сценарий: поставщик выдал код, ответ не дошёл.
+ *
+ * Проверяется, что переключения на резервного не произошло — иначе выдача
+ * задвоилась бы, — и что повтор после восстановления вернул тот же код.
+ *
+ * @return array{checks: array<string, bool>, facts: array<string, mixed>}
+ */
+function trap(Container $c, Connection $db, string $base, string $sku): array
+{
+    behavior($base, 'a', 'issue_then_timeout', 3);
+    behavior($base, 'b', 'ok');
+
+    $orderId = payFor($c, $base, $sku);
+    $afterTimeout = inspect($db, $orderId);
+
+    // Поставщик восстановился: повтор идёт к нему же с тем же идентификатором.
+    behavior($base, 'a', 'ok');
+    $db->execute("UPDATE jobs SET run_at = now() WHERE status = 'pending' AND payload->>'order_id' = ?", [$orderId]);
+    drainQueue($c);
+
+    $final = inspect($db, $orderId);
+
+    return [
+        'facts' => [
+            'после таймаута' => [
+                'выдача'    => $afterTimeout['выдача'],
+                'кодов_a'   => $afterTimeout['кодов_a'],
+                'кодов_b'   => $afterTimeout['кодов_b'],
+                'unknown'   => $afterTimeout['unknown'],
+            ],
+            'после повтора' => [
+                'статус'    => $final['статус'],
+                'поставщик' => $final['поставщик'],
+                'кодов'     => $final['кодов'],
+            ],
+        ],
+        'checks' => [
+            'неответ не принят за отказ'          => $afterTimeout['выдача'] === 'unresolved',
+            'зафиксированы неразрешённые попытки' => $afterTimeout['unknown'] > 0,
+            'на резервного не переключились'      => $afterTimeout['кодов_b'] === 0,
+            'основной списал ровно один код'      => $afterTimeout['кодов_a'] === 1,
+            'повтор довёл заказ до выдачи'        => $final['статус'] === 'delivered',
+            'выдал тот же поставщик'              => $final['поставщик'] === 'a',
+            'второго кода не появилось'           => $final['кодов'] === 1,
+            'выдан именно занятый ранее код'      => $final['код'] === $afterTimeout['занятый_код'],
+        ],
+    ];
+}
+
+/** @return array{checks: array<string, bool>, facts: array<string, mixed>} */
+function bothDown(Container $c, Connection $db, string $base, string $sku): array
+{
+    behavior($base, 'a', 'error');
+    behavior($base, 'b', 'error');
+
+    $orderId = payFor($c, $base, $sku);
+    $afterFailure = inspect($db, $orderId);
+
+    behavior($base, 'b', 'ok');
+    $db->execute("UPDATE jobs SET run_at = now() WHERE status = 'pending' AND payload->>'order_id' = ?", [$orderId]);
+    drainQueue($c);
+
+    $final = inspect($db, $orderId);
+
+    return [
+        'facts' => [
+            'после отказа'   => ['статус' => $afterFailure['статус'], 'выдача' => $afterFailure['выдача']],
+            'после подъёма'  => ['статус' => $final['статус'], 'поставщик' => $final['поставщик']],
+        ],
+        'checks' => [
+            'состояние восстановимое'     => $afterFailure['статус'] === 'delivery_failed',
+            'кодов не списано'            => $afterFailure['кодов'] === 0,
+            'приложение отвечает'         => health($base) === 200,
+            'после подъёма заказ выдан'   => $final['статус'] === 'delivered',
+            'списан ровно один код'       => $final['кодов'] === 1,
+        ],
+    ];
+}
+
+
+// ── вспомогательное ─────────────────────────────────────────────────────────
+
+/** @return array<string, mixed> */
+function inspect(Connection $db, string $orderId): array
+{
+    $order = $db->selectOne('SELECT status FROM orders WHERE id = ?', [$orderId]);
+    $delivery = $db->selectOne('SELECT * FROM deliveries WHERE order_id = ?', [$orderId]);
+    $stock = $db->select(
+        'SELECT provider, code FROM provider_stock WHERE request_id LIKE ?',
+        ['%' . $orderId . '%']
+    );
+
+    $byProvider = static fn (string $p): int => count(array_filter(
+        $stock,
+        static fn (array $row): bool => $row['provider'] === $p
+    ));
+
+    return [
+        'статус'      => $order['status'] ?? '?',
+        'выдача'      => $delivery['status'] ?? '—',
+        'поставщик'   => $delivery['provider'] ?? '—',
+        'код'         => $delivery['code'] ?? null,
+        'занятый_код' => $stock[0]['code'] ?? null,
+        'кодов'       => count($stock),
+        'кодов_a'     => $byProvider('a'),
+        'кодов_b'     => $byProvider('b'),
+        'unknown'     => count($db->select(
+            "SELECT 1 FROM delivery_attempts WHERE order_id = ? AND outcome = 'unknown'", [$orderId]
+        )),
+        'попыток_a'   => count($db->select(
+            "SELECT 1 FROM delivery_attempts WHERE order_id = ? AND provider = 'a'", [$orderId]
+        )),
+    ];
+}
+
+/** Создаёт заказ, оплачивает его и доводит очередь до конца. */
+function payFor(Container $c, string $base, string $sku): string
+{
+    $orderId = post($base . '/api/orders', ['sku' => $sku])['order_id'] ?? '';
+
+    if ($orderId === '') {
+        fwrite(STDERR, "Не удалось создать заказ\n");
+        exit(2);
+    }
+
+    post($base . '/api/webhooks/payment', [
+        'event_id'   => 'evt_' . bin2hex(random_bytes(6)),
+        'order_id'   => $orderId,
+        'status'     => 'paid',
+        'amount'     => 1990,
+        'currency'   => 'RUB',
+        'created_at' => gmdate('Y-m-d\TH:i:s\Z'),
+    ]);
+
+    drainQueue($c);
+
+    return $orderId;
+}
+
+function behavior(string $base, string $provider, string $mode, int $hangSeconds = 3): void
+{
+    post($base . "/stubs/provider-$provider/behavior", ['mode' => $mode, 'hang_seconds' => $hangSeconds]);
+}
+
+/**
+ * @param array<string, mixed> $payload
+ * @return array<string, mixed>
+ */
+function post(string $url, array $payload): array
+{
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_POST           => true,
+        CURLOPT_POSTFIELDS     => json_encode($payload, JSON_UNESCAPED_UNICODE),
+        CURLOPT_HTTPHEADER     => ['Content-Type: application/json'],
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT        => 30,
+    ]);
+    $body = json_decode((string) curl_exec($ch), true);
+    curl_close($ch);
+
+    return is_array($body) ? $body : [];
+}
+
+function health(string $base): int
+{
+    $ch = curl_init($base . '/health');
+    curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 5]);
+    curl_exec($ch);
+    $code = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+    curl_close($ch);
+
+    return $code;
+}
+
+/** Держит на складах обоих поставщиков достаточный запас. */
+function ensureStock(Connection $db, string $sku, int $minimum): void
+{
+    foreach (['a', 'b'] as $provider) {
+        $free = count($db->select(
+            'SELECT 1 FROM provider_stock WHERE provider = ? AND sku = ? AND request_id IS NULL',
+            [$provider, $sku]
+        ));
+
+        for ($i = $free; $i < $minimum; $i++) {
+            $db->execute(
+                'INSERT INTO provider_stock (provider, sku, code) VALUES (?, ?, ?)
+                 ON CONFLICT (provider, code) DO NOTHING',
+                [$provider, $sku, $provider . '-FLV-' . bin2hex(random_bytes(5))]
+            );
+        }
+    }
+}
+
+function drainQueue(Container $container): void
+{
+    $worker = $container->get(App\Queue\Worker::class);
+
+    for ($i = 0; $i < 50 && $worker->tick(); $i++) {
+        // задачи обрабатываются по одной
+    }
+}

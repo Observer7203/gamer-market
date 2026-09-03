@@ -1,0 +1,415 @@
+ПРОВЕРКА ЭТАПА 3
+Устойчивые интеграции и обработка отсутствия ответа
+------------------------------------------------------------------------------
+
+Требование: два поставщика-заглушки, случайно падающие и отвечающие
+с задержкой. Таймауты, повторы с отсрочкой, переключение на резервного.
+Ключевое: отсутствие ответа не равнозначно отказу — поставщик мог выдать код,
+и повтор не должен привести к повторной выдаче.
+
+Раздел 1 — что сделано.
+Раздел 2 — автоматические тесты.
+Раздел 3 — воспроизводимый скрипт.
+Разделы 4-9 — ручной прогон сценариев.
+
+Все команды выполняются из корня проекта при поднятом окружении.
+После изменения кода выдачи обязателен перезапуск фоновых процессов:
+
+    docker compose restart worker scheduler
+
+
+==============================================================================
+1. ЧТО СДЕЛАНО
+------------------------------------------------------------------------------
+
+Два поставщика
+~~~~~~~~~~~~~~
+
+Заглушки a и b с независимыми складами. Один и тот же код у разных
+поставщиков — разные экземпляры товара, как и в жизни. Порядок в конфигурации
+задаёт приоритет: b используется как резервный.
+
+Поведение задаётся таблицей provider_settings на каждого поставщика:
+
+    random              случайные отказы и неответы по заданным долям
+    ok                  всегда выдаёт
+    error               всегда отказывает
+    out_of_stock        сообщает об отсутствии товара
+    timeout             молчит, кода не выдаёт
+    issue_then_timeout  выдаёт код и молчит — ответ не доходит
+
+Режим random соответствует условию «случайно падающие»; остальные делают
+поведение детерминированным, что требуется для воспроизводимых сценариев.
+
+Три исхода вместо двух
+~~~~~~~~~~~~~~~~~~~~~~
+
+    ok        код получен
+    error     явный отказ: состояние поставщика известно, выдачи не было
+    unknown   ответа нет: состояние поставщика неизвестно
+
+Различие между error и unknown — основа всего этапа. Клиент относит
+к unknown только истечение таймаута; неустановленное соединение считается
+отказом, поскольку запрос до поставщика не дошёл.
+
+Повторы и переключение
+~~~~~~~~~~~~~~~~~~~~~~
+
+    ok       выдача завершена
+    error    повторы к этому поставщику прекращаются, переключение на резерв
+    unknown  повтор к тому же поставщику с тем же request_id
+
+Отсрочка между повторами удваивается: 200, 400 мс при трёх попытках.
+
+Переключение на резервного поставщика допустимо только после явного ответа
+предыдущего. Молчание основанием не является: обращение к резервному
+создало бы вторую выдачу.
+
+Если повторы исчерпаны, а ответа так и не было, выдача переходит
+в состояние unresolved с указанием поставщика. Заказ возвращается в очередь
+и при следующей попытке обращается к тому же поставщику с тем же
+идентификатором запроса.
+
+Детерминированный идентификатор запроса
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+    request_id = req_<order_id>_<provider>
+
+Выводится из пары «заказ — поставщик», а не генерируется на каждую попытку.
+Поэтому повтор обращается к тому же запросу, и заглушка по контракту
+возвращает уже выданный код — за это отвечает уникальный индекс
+provider_stock (provider, request_id), а не проверка в коде.
+
+История попыток
+~~~~~~~~~~~~~~~
+
+Таблица delivery_attempts хранит каждое обращение: поставщик, идентификатор
+запроса, номер попытки, исход, причину, код ответа, длительность.
+Без неё повтор не смог бы отличить «не отвечал» от «отказал».
+
+Результат
+~~~~~~~~~
+
+    bin/failover, 5 сценариев x 3 повтора    72 проверки, 0 нарушений
+    автоматические наборы                    69 тестов, 165 утверждений
+
+
+==============================================================================
+2. АВТОМАТИЧЕСКИЕ ТЕСТЫ
+------------------------------------------------------------------------------
+
+    docker compose exec app vendor/bin/phpunit --filter ProviderFailover
+
+    ✔ ОсновнойПоставщикВыдаётКод
+    ✔ ОтказОсновногоПереключаетНаРезервного
+    ✔ ЯвныйОтказНеПовторяется
+    ✔ ПустойОстатокПереключаетНаРезервного
+    ✔ ОтсутствиеОтветаНеПринимаетсяЗаОтказ
+    ✔ ПовторПослеНеответаВозвращаетТотЖеКод
+    ✔ ОтказОбоихВосстановим
+    ✔ ПовторыИдутСТемЖеИдентификаторомЗапроса
+
+Весь прогон:
+
+    docker compose exec app vendor/bin/phpunit
+
+    OK (69 tests, 165 assertions)
+
+В тестах заглушка вызывается внутри процесса, задержка заменена немедленным
+исходом unknown: ожидание реального таймаута удлинило бы прогон на секунды,
+не добавив проверяемого поведения.
+
+
+==============================================================================
+3. ВОСПРОИЗВОДИМЫЙ СКРИПТ
+------------------------------------------------------------------------------
+
+    docker compose exec app php bin/failover
+
+Прогоняет пять сценариев, после каждого проверяет ожидаемое состояние.
+Ненулевой код возврата означает нарушение.
+
+    --scenario=healthy | fallback | empty | trap | both_down
+    --repeat=N
+    --sku=...
+
+Примеры:
+
+    docker compose exec app php bin/failover --scenario=trap
+    docker compose exec app php bin/failover --repeat=3
+
+Ожидаемый вывод:
+
+    ── оба поставщика отвечают
+      1/1  ок   {"статус":"delivered","поставщик":"a","кодов":1, ...}
+
+    ── A отказывает, переключение на B
+      1/1  ок   {"статус":"delivered","поставщик":"b","кодов_a":0,"кодов_b":1, ...}
+
+    ── у A пусто, переключение на B
+      1/1  ок   {"статус":"delivered","поставщик":"b", ...}
+
+    ── A выдал код, ответ не дошёл
+      1/1  ок   {"после таймаута":{"выдача":"unresolved","кодов_a":1,"кодов_b":0,
+                 "unknown":3},"после повтора":{"статус":"delivered",
+                 "поставщик":"a","кодов":1}}
+
+    ── оба недоступны, затем восстановление
+      1/1  ок   {"после отказа":{"статус":"delivery_failed"},
+                 "после подъёма":{"статус":"delivered","поставщик":"b"}}
+
+    Проверок: 24, нарушений: 0
+
+Скрипт восстанавливает режим ok у обоих поставщиков при завершении.
+
+
+==============================================================================
+4. УПРАВЛЕНИЕ ПОВЕДЕНИЕМ ЗАГЛУШЕК
+------------------------------------------------------------------------------
+
+Служебный маршрут задаёт поведение без правки кода и перезапуска:
+
+    docker compose exec app curl -s -X POST \
+      http://nginx/stubs/provider-a/behavior \
+      -H 'Content-Type: application/json' \
+      -d '{"mode":"error"}'
+
+    {"provider":"a","mode":"error","fail_rate":0,"timeout_rate":0,"hang_seconds":5}
+
+Случайные сбои по долям:
+
+    docker compose exec app curl -s -X POST \
+      http://nginx/stubs/provider-a/behavior \
+      -H 'Content-Type: application/json' \
+      -d '{"mode":"random","fail_rate":0.3,"timeout_rate":0.3,"hang_seconds":3}'
+
+Половина неответов приходится на случай, когда код уже выдан: именно он
+отличает отсутствие ответа от отказа.
+
+Текущие настройки:
+
+    docker compose exec db psql -U gamer -d gamer_market -c \
+      "SELECT provider, mode, fail_rate, timeout_rate, hang_seconds
+         FROM provider_settings ORDER BY provider;"
+
+Возврат к исправному состоянию:
+
+    for p in a b; do
+      docker compose exec app curl -s -X POST \
+        http://nginx/stubs/provider-$p/behavior \
+        -H 'Content-Type: application/json' -d '{"mode":"ok"}' > /dev/null
+    done
+
+
+==============================================================================
+5. РУЧНОЙ ПРОГОН: ПЕРЕКЛЮЧЕНИЕ НА РЕЗЕРВНОГО
+------------------------------------------------------------------------------
+
+Подготовка вспомогательных команд:
+
+    mode() { docker compose exec -T app curl -s -X POST \
+      "http://nginx/stubs/provider-$1/behavior" -H 'Content-Type: application/json' \
+      -d "{\"mode\":\"$2\",\"hang_seconds\":${3:-4}}" > /dev/null; }
+
+    order() { curl -s -X POST http://localhost:8080/api/orders \
+      -H 'Content-Type: application/json' -d '{"sku":"KEY-GTA5"}' \
+      | php -r 'echo json_decode(stream_get_contents(STDIN),true)["order_id"];'; }
+
+    pay() { docker compose exec -T app php bin/pay --order=$1 --amount=1990 \
+      --url=http://nginx/api/webhooks/payment > /dev/null; }
+
+Сценарий:
+
+    mode a error
+    mode b ok
+    ID=$(order); pay $ID; sleep 4
+
+    docker compose exec db psql -U gamer -d gamer_market -c \
+      "SELECT provider, attempt_no, outcome, reason
+         FROM delivery_attempts WHERE order_id='$ID' ORDER BY id;"
+
+    provider | attempt_no | outcome |       reason
+    ---------+------------+---------+----------------------
+    a        |          1 | error   | provider_unavailable
+    b        |          1 | ok      |
+
+Одна попытка к отказавшему поставщику: состояние известно, повторять нечего.
+
+    docker compose exec db psql -U gamer -d gamer_market -c \
+      "SELECT o.status, d.provider, d.code FROM orders o
+         JOIN deliveries d ON d.order_id=o.id WHERE o.id='$ID';"
+
+    delivered | b | b-...
+
+
+==============================================================================
+6. РУЧНОЙ ПРОГОН: ЛОВУШКА ОТСУТСТВИЯ ОТВЕТА
+------------------------------------------------------------------------------
+
+Главный сценарий этапа. Поставщик выдаёт код и замолкает.
+
+    mode a issue_then_timeout 4
+    mode b ok
+    ID=$(order); pay $ID
+    sleep 12
+
+Ожидаемое состояние после исчерпания повторов:
+
+    docker compose exec db psql -U gamer -d gamer_market -c \
+      "SELECT provider, attempt_no, outcome, reason
+         FROM delivery_attempts WHERE order_id='$ID' ORDER BY id;"
+
+    provider | attempt_no | outcome | reason
+    ---------+------------+---------+---------
+    a        |          1 | unknown | timeout
+    a        |          2 | unknown | timeout
+    a        |          3 | unknown | timeout
+
+Три попытки к одному поставщику, ни одного обращения к резервному.
+
+    docker compose exec db psql -U gamer -d gamer_market -c \
+      "SELECT o.status, d.status AS выдача, d.unresolved_provider
+         FROM orders o JOIN deliveries d ON d.order_id=o.id WHERE o.id='$ID';"
+
+    delivery_failed | unresolved | a
+
+Что реально занято на складах:
+
+    docker compose exec db psql -U gamer -d gamer_market -c \
+      "SELECT provider, code, request_id FROM provider_stock
+        WHERE request_id LIKE '%$ID%';"
+
+    a | a-HHW6-4RX2-DX62 | req_..._a
+
+Код у основного поставщика занят — он его действительно выдал. У резервного
+не занято ничего. Переключение создало бы вторую выдачу.
+
+Разрешение неопределённости:
+
+    mode a ok
+    docker compose exec db psql -U gamer -d gamer_market -c \
+      "UPDATE jobs SET run_at=now() WHERE status='pending'
+         AND payload->>'order_id'='$ID';"
+    sleep 4
+
+    curl -s http://localhost:8080/api/orders/$ID
+
+    "status": "delivered",
+    "delivery": { "code": "a-HHW6-4RX2-DX62" }
+
+Возвращён тот же код, который поставщик занял в первой, оборвавшейся
+по таймауту попытке. Всего с обоих складов ушёл один код.
+
+
+==============================================================================
+7. РУЧНОЙ ПРОГОН: ОТКАЗ ОБОИХ ПОСТАВЩИКОВ
+------------------------------------------------------------------------------
+
+    mode a error
+    mode b error
+    ID=$(order); pay $ID; sleep 4
+
+    docker compose exec db psql -U gamer -d gamer_market -c \
+      "SELECT o.status, d.status AS выдача FROM orders o
+         JOIN deliveries d ON d.order_id=o.id WHERE o.id='$ID';"
+
+    delivery_failed | failed
+
+Состояние восстановимое, приложение работоспособно:
+
+    curl -s http://localhost:8080/health     ->  status: ok
+
+Задача возвращена в очередь с отсрочкой, а не помечена проваленной:
+
+    docker compose exec db psql -U gamer -d gamer_market -c \
+      "SELECT status, attempts, last_error, run_at > now() AS отложена
+         FROM jobs WHERE status <> 'done' ORDER BY id DESC LIMIT 1;"
+
+После восстановления любого из поставщиков заказ доводится до выдачи:
+
+    mode b ok
+    docker compose exec db psql -U gamer -d gamer_market -c \
+      "UPDATE jobs SET run_at=now() WHERE status='pending'
+         AND payload->>'order_id'='$ID';"
+    sleep 4
+
+
+==============================================================================
+8. РУЧНОЙ ПРОГОН: СЛУЧАЙНЫЕ СБОИ
+------------------------------------------------------------------------------
+
+Условие задания: заглушки случайно падают и отвечают с задержкой.
+
+    mode_random() { docker compose exec -T app curl -s -X POST \
+      "http://nginx/stubs/provider-$1/behavior" -H 'Content-Type: application/json' \
+      -d "{\"mode\":\"random\",\"fail_rate\":$2,\"timeout_rate\":$3,\"hang_seconds\":3}" \
+      > /dev/null; }
+
+    mode_random a 0.3 0.3
+    mode b ok
+
+    for i in $(seq 1 10); do ID=$(order); pay $ID; done
+    sleep 40
+
+Распределение исходов:
+
+    docker compose exec db psql -U gamer -d gamer_market -c \
+      "SELECT provider, outcome, count(*) FROM delivery_attempts
+        WHERE created_at > now() - interval '3 minutes'
+        GROUP BY provider, outcome ORDER BY 1, 3 DESC;"
+
+Присутствие строк с исходом unknown подтверждает, что сценарий отработал.
+
+Состояния заказов:
+
+    docker compose exec db psql -U gamer -d gamer_market -c \
+      "SELECT status, count(*) FROM orders
+        WHERE created_at > now() - interval '3 minutes' GROUP BY status;"
+
+Заказы в состояниях delivery_failed и out_of_stock восстановимы: после
+возврата поставщика в исправное состояние фоновая обработка доводит их
+до выдачи.
+
+
+==============================================================================
+9. ПРОВЕРКА ИНВАРИАНТА ПРИ ЛЮБЫХ СБОЯХ
+------------------------------------------------------------------------------
+
+Главное требование этапа: ни при каких отказах и неответах заказ
+не получает двух кодов.
+
+    docker compose exec db psql -U gamer -d gamer_market -c "
+    SELECT count(*) AS заказов_с_двумя_кодами FROM (
+      SELECT substring(request_id from 'ord_[0-9A-Z]+') AS ord
+        FROM provider_stock WHERE request_id IS NOT NULL
+       GROUP BY 1 HAVING count(*) > 1) x;"
+
+Значение обязано быть нулевым независимо от числа прогонов и доли сбоев.
+
+Заказы, по которым обращались к обоим поставщикам:
+
+    docker compose exec db psql -U gamer -d gamer_market -c "
+    SELECT order_id, count(DISTINCT provider) AS поставщиков,
+           count(*) FILTER (WHERE outcome = 'unknown') AS без_ответа
+      FROM delivery_attempts GROUP BY order_id
+     HAVING count(DISTINCT provider) > 1 ORDER BY 3 DESC LIMIT 10;"
+
+Обращение к двум поставщикам допустимо только при явном отказе первого.
+Строка, где поставщиков два и при этом есть неразрешённые попытки
+у первого, означала бы нарушение.
+
+    docker compose exec db psql -U gamer -d gamer_market -c "
+    SELECT count(*) AS переключений_после_молчания FROM (
+      SELECT a.order_id FROM delivery_attempts a
+       WHERE a.outcome = 'unknown'
+         AND EXISTS (SELECT 1 FROM delivery_attempts b
+                      WHERE b.order_id = a.order_id
+                        AND b.provider <> a.provider
+                        AND b.created_at > a.created_at)
+         AND NOT EXISTS (SELECT 1 FROM delivery_attempts c
+                          WHERE c.order_id = a.order_id
+                            AND c.provider = a.provider
+                            AND c.outcome IN ('ok', 'error'))
+       GROUP BY a.order_id) x;"
+
+Значение обязано быть нулевым: переключение после молчания запрещено.
