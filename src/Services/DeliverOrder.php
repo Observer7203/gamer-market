@@ -18,6 +18,11 @@ use App\Support\Logger;
  * Первая транзакция занимает слот выдачи, вторая записывает результат.
  * Слот занимается условным UPDATE: если строка уже в работе или выдана,
  * затронуто ноль строк и второй исполнитель прекращает работу.
+ *
+ * Обе транзакции берут блокировки в одном порядке — заказ, затем выдача.
+ * Обратный порядок во второй транзакции приводил к взаимной блокировке:
+ * один процесс удерживал строку выдачи и ждал строку заказа, другой —
+ * наоборот.
  */
 final class DeliverOrder
 {
@@ -103,6 +108,11 @@ final class DeliverOrder
     private function store(string $orderId, string $requestId, array $response): string
     {
         return $this->db->transaction(function (Connection $db) use ($orderId, $requestId, $response): string {
+            // Порядок блокировок совпадает с порядком в claim: сначала заказ,
+            // затем выдача. Обратный порядок здесь приводил к взаимной
+            // блокировке при конкурентных исполнителях.
+            $db->selectOne('SELECT id FROM orders WHERE id = ? FOR UPDATE', [$orderId]);
+
             if ($response['outcome'] === 'ok') {
                 $db->execute(
                     'UPDATE deliveries SET status = ?, code = ?, last_error = NULL,
