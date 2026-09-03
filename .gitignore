@@ -11,3 +11,4 @@
 /docs/QA.txt
 /docs/LOAD.md
 /bin/md-txt
+.phpunit.cache/

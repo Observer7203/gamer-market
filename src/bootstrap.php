@@ -5,6 +5,7 @@ declare(strict_types=1);
 use App\Database\Connection;
 use App\Database\Migrator;
 use App\Database\PostgresConnection;
+use App\Services\HttpProviderClient;
 use App\Services\ProviderClient;
 use App\Http\Router;
 use App\Support\Container;
@@ -33,7 +34,7 @@ return (static function (): Container {
 
     $container->singleton(Logger::class, fn (): Logger => new Logger($config['log']['path']));
 
-    $container->singleton(ProviderClient::class, fn (Container $c): ProviderClient => new ProviderClient(
+    $container->singleton(ProviderClient::class, fn (Container $c): ProviderClient => new HttpProviderClient(
         $config['provider']['url'],
         $config['provider']['connect_timeout'],
         $config['provider']['timeout'],
