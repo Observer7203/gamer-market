@@ -29,8 +29,11 @@ docker compose exec app php bin/seed
 curl http://localhost:8080/health
 ```
 
-Веб-панель управления базой: http://localhost:8081 (сервер `db`,
-логин `gamer`, пароль `secret`).
+| | |
+|---|---|
+| Документация API | http://localhost:8080/docs/ |
+| Спецификация OpenAPI | http://localhost:8080/openapi.yaml |
+| Панель управления базой | http://localhost:8081 (сервер `db`, `gamer` / `secret`) |
 
 ## Тесты
 
@@ -91,7 +94,7 @@ data/           каталог товаров и пул ключей
 docker/         nginx + php-fpm
 docs/           архитектура, нагрузочный профиль
 migrations/     .sql, применяются по порядку имён, каждая в транзакции
-public/         index.php — единственная точка входа HTTP
+public/         index.php — точка входа HTTP, спецификация и документация API
 src/
   Controllers/  тонкие: разобрать запрос, вызвать сервис, отдать HTTP
   Models/       Order, PaymentEvent, Delivery — состояние и правила

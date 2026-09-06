@@ -1,0 +1,639 @@
+openapi: 3.0.3
+
+info:
+  title: Ядро магазина цифровых товаров
+  version: "1.0"
+  license:
+    name: MIT
+  description: |
+    Приём заказов, обработка платёжных событий и автоматическая выдача товара
+    от поставщика.
+
+    ## Единицы измерения
+
+    Внутри системы денежные величины хранятся в минорных единицах валюты
+    целым числом. Контракт оперирует целыми рублями: поле `amount` в запросах
+    и ответах содержит мажорные единицы.
+
+    ## Гарантии обработки событий
+
+    Платёжная система доставляет события не менее одного раза и не обязательно
+    в порядке возникновения. Обработчик вебхука идемпотентен: повтор с тем же
+    `event_id` не изменяет состояние. Порядок определяется полем `created_at`
+    платёжной системы, а не порядком доставки.
+
+    Ответ `2xx` означает, что событие принято и разобрано, а не что заказ
+    исполнен. Несоответствие суммы или отсутствие заказа не являются ошибкой
+    доставки: событие сохраняется и попадает в отчёт сверки. Код `5xx`
+    возвращается только при сбое на стороне сервиса и приводит к повторной
+    доставке.
+
+    ## Выдача
+
+    Выдача выполняется асинхронно: обращение к поставщику занимает секунды,
+    а ответ платёжной системе должен уложиться в миллисекунды. После приёма
+    события заказ переходит в `paid`, и код появляется в ответе
+    `GET /api/orders/{id}` спустя доли секунды.
+
+# Аутентификация не применяется намеренно: контракт платёжной системы
+# прямо оговаривает отказ от проверки подписи, а служебные маршруты
+# доступны только внутри сети окружения.
+security: []
+
+servers:
+  - url: http://localhost:8080
+    description: Локальное окружение
+
+tags:
+  - name: Каталог
+    description: Витрина товаров
+  - name: Заказы
+    description: Создание и чтение заказов
+  - name: Платежи
+    description: Приём событий платёжной системы
+  - name: Эксплуатация
+    description: Готовность и сверка
+  - name: Заглушки поставщиков
+    description: |
+      Имитация внешних поставщиков. Реального доступа к ним нет, поэтому
+      обе заглушки размещены в том же приложении, но вызываются по HTTP,
+      как чужой сервис.
+
+paths:
+
+  /api/catalog:
+    get:
+      operationId: showcase
+      tags: [Каталог]
+      summary: Витрина товаров
+      description: |
+        Постраничный вывод по ключу, а не по смещению: позиция задаётся
+        курсором из ответа. Смещение заставляет прочитать и отбросить все
+        предыдущие строки, поэтому глубокие страницы дорожают линейно.
+
+        Остаток берётся из денормализованного счётчика, поддерживаемого
+        в той же транзакции, что и выдача кода.
+      parameters:
+        - name: type
+          in: query
+          description: Раздел витрины
+          schema:
+            type: string
+            enum: [key, topup, subscription, giftcard]
+        - name: in_stock
+          in: query
+          description: Только позиции с ненулевым остатком
+          schema:
+            type: integer
+            enum: [0, 1]
+        - name: limit
+          in: query
+          description: Размер страницы, не более 100
+          schema:
+            type: integer
+            default: 20
+            minimum: 1
+            maximum: 100
+        - name: after
+          in: query
+          description: Курсор из поля `next_cursor` предыдущего ответа
+          schema:
+            type: string
+          example: NDk5OTpHRU4tS0VZLTAwMDAx
+      responses:
+        "200":
+          description: Страница витрины
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next_cursor]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/CatalogItem"
+                  next_cursor:
+                    type: string
+                    nullable: true
+                    description: Отсутствует на последней странице
+              example:
+                items:
+                  - sku: KEY-GTA5
+                    name: GTA V ключ активации
+                    type: key
+                    price: 1990
+                    currency: RUB
+                    available: 8
+                next_cursor: NDk5OTpHRU4tS0VZLTAwMDAx
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+
+  /api/orders:
+    post:
+      operationId: createOrder
+      tags: [Заказы]
+      summary: Создание заказа
+      description: |
+        Сумму определяет сервер по каталогу. Поле `amount` в запросе
+        игнорируется: иначе клиент назначал бы цену сам.
+
+        Цена копируется в заказ на момент создания, поэтому последующая
+        переоценка товара не изменяет сумму уже оформленного заказа.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sku]
+              properties:
+                sku:
+                  type: string
+                  description: Артикул товара
+                  example: KEY-GTA5
+      responses:
+        "201":
+          description: Заказ создан
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Order"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "404":
+          description: Артикул не найден или снят с продажи
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error:
+                  code: product_not_found
+                  message: Товар [NO-SUCH-SKU] не найден или снят с продажи
+
+  /api/orders/{id}:
+    get:
+      operationId: getOrder
+      tags: [Заказы]
+      summary: Состояние заказа
+      description: |
+        Блок `delivery` появляется только после успешной выдачи. До этого
+        момента его в ответе нет.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          example: ord_01M1V74GDR7FW5KKQYYK30X2RC
+      responses:
+        "200":
+          description: Заказ найден
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Order"
+              examples:
+                ожидает оплаты:
+                  value:
+                    order_id: ord_01M1V74GDR7FW5KKQYYK30X2RC
+                    sku: KEY-GTA5
+                    amount: 1990
+                    currency: RUB
+                    status: created
+                    created_at: "2026-09-06 10:16:18.378953+00"
+                выдан:
+                  value:
+                    order_id: ord_01M1V74GDR7FW5KKQYYK30X2RC
+                    sku: KEY-GTA5
+                    amount: 1990
+                    currency: RUB
+                    status: delivered
+                    created_at: "2026-09-06 10:16:18.378953+00"
+                    delivery:
+                      code: a-HHW6-4RX2-DX62
+                      delivered_at: "2026-09-06 10:18:09.233881+00"
+        "404":
+          description: Заказ не найден
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/webhooks/payment:
+    post:
+      operationId: receivePaymentEvent
+      tags: [Платежи]
+      summary: Событие платёжной системы
+      description: |
+        Запись события и его применение выполняются одной транзакцией:
+        раздельная фиксация привела бы к состоянию, в котором повторная
+        доставка отбрасывается как дубликат, а заказ остаётся неисполненным.
+
+        Ответ содержит исход обработки. Все исходы возвращаются с кодом `200`,
+        поскольку повторная доставка их не изменит.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PaymentEvent"
+      responses:
+        "200":
+          description: Событие принято
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accepted:
+                    type: boolean
+                  outcome:
+                    type: string
+                    enum: [applied, duplicate, ignored, amount_mismatch, order_not_found, superseded]
+                    description: |
+                      * `applied` — состояние заказа изменено
+                      * `duplicate` — событие с таким `event_id` уже принято
+                      * `ignored` — заказ в состоянии, из которого переход запрещён
+                      * `amount_mismatch` — сумма или валюта не совпадают с заказом
+                      * `order_not_found` — заказа ещё нет, событие ожидает
+                      * `superseded` — существует применённое событие, возникшее позже
+              example:
+                accepted: true
+                outcome: applied
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "500":
+          description: |
+            Сбой на стороне сервиса. Платёжной системе следует повторить
+            доставку.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/admin/reconciliation:
+    get:
+      operationId: getReconciliationReport
+      tags: [Эксплуатация]
+      summary: Отчёт сверки
+      description: |
+        Шесть разделов, в исправной системе пустых. Код ответа отражает
+        результат, поэтому расхождение видно системе мониторинга без разбора
+        тела.
+
+        Баланс обязательств равен сумме оплаченных, но не выданных заказов.
+      responses:
+        "200":
+          description: Расхождений нет
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReconciliationReport"
+        "409":
+          description: Обнаружены расхождения
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReconciliationReport"
+
+  /health:
+    get:
+      operationId: getHealth
+      tags: [Эксплуатация]
+      summary: Готовность к работе
+      description: |
+        Проверяется только доступность базы. Отказ поставщика намеренно
+        не учитывается: это штатный сценарий, обрабатываемый повторами
+        и переключением, и он не является основанием для перезапуска.
+      responses:
+        "200":
+          description: Готов
+          content:
+            application/json:
+              example:
+                status: ok
+                database: up
+                php: 8.3.33
+        "503":
+          description: |
+            База недоступна. Балансировщику следует вывести экземпляр
+            из обслуживания.
+          content:
+            application/json:
+              example:
+                status: degraded
+                database: down
+                php: 8.3.33
+
+  /stubs/provider-{provider}/issue:
+    post:
+      operationId: stubIssue
+      tags: [Заглушки поставщиков]
+      summary: Получение кода
+      description: |
+        Повтор с тем же `request_id` возвращает тот же код. Обеспечивается
+        уникальным индексом, а не проверкой в коде: при конкурентных повторах
+        проверка не даёт гарантий.
+
+        Именно это делает безопасным повтор после истечения таймаута:
+        отсутствие ответа не означает, что код не был выдан.
+      parameters:
+        - $ref: "#/components/parameters/Provider"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [request_id, sku, order_id]
+              properties:
+                request_id:
+                  type: string
+                  description: Идентификатор запроса, детерминированный для повторов
+                  example: req_ord_01M1V74GDR7FW5KKQYYK30X2RC_a
+                sku:
+                  type: string
+                  example: KEY-GTA5
+                order_id:
+                  type: string
+                  example: ord_01M1V74GDR7FW5KKQYYK30X2RC
+      responses:
+        "200":
+          description: Код выдан
+          content:
+            application/json:
+              example:
+                status: ok
+                request_id: req_ord_01M1V74GDR7FW5KKQYYK30X2RC_a
+                code: a-HHW6-4RX2-DX62
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "409":
+          description: Товара нет в наличии
+          content:
+            application/json:
+              example:
+                status: error
+                reason: out_of_stock
+        "500":
+          description: Поставщик недоступен
+          content:
+            application/json:
+              example:
+                status: error
+                reason: provider_unavailable
+
+  /stubs/provider-{provider}/behavior:
+    post:
+      operationId: stubBehavior
+      tags: [Заглушки поставщиков]
+      summary: Управление поведением заглушки
+      description: |
+        Служебный маршрут: позволяет воспроизводить отказы и отсутствие
+        ответа детерминированно, без правки кода и перезапуска.
+
+        Режим `random` соответствует условию «случайно падает и отвечает
+        с задержкой». Половина случаев отсутствия ответа приходится
+        на `issue_then_timeout` — код выдан, ответ не дошёл.
+      parameters:
+        - $ref: "#/components/parameters/Provider"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                mode:
+                  type: string
+                  enum: [random, ok, error, out_of_stock, timeout, issue_then_timeout]
+                  default: random
+                  description: |
+                    * `ok` — всегда выдаёт код
+                    * `error` — всегда отказывает
+                    * `out_of_stock` — сообщает об отсутствии товара
+                    * `timeout` — молчит, кода не выдаёт
+                    * `issue_then_timeout` — выдаёт код и молчит
+                    * `random` — разыгрывает исход по заданным долям
+                fail_rate:
+                  type: number
+                  format: float
+                  minimum: 0
+                  maximum: 1
+                  description: Доля отказов в режиме `random`
+                timeout_rate:
+                  type: number
+                  format: float
+                  minimum: 0
+                  maximum: 1
+                  description: Доля отсутствия ответа в режиме `random`
+                hang_seconds:
+                  type: integer
+                  default: 5
+                  description: Длительность молчания, секунды
+            examples:
+              исправен:
+                value: {mode: ok}
+              всегда отказывает:
+                value: {mode: error}
+              выдал и замолчал:
+                value: {mode: issue_then_timeout, hang_seconds: 4}
+              случайные сбои:
+                value: {mode: random, fail_rate: 0.3, timeout_rate: 0.3, hang_seconds: 3}
+      responses:
+        "200":
+          description: Поведение установлено
+          content:
+            application/json:
+              example:
+                provider: a
+                mode: error
+                fail_rate: 0
+                timeout_rate: 0
+                hang_seconds: 5
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+
+components:
+
+  parameters:
+    Provider:
+      name: provider
+      in: path
+      required: true
+      description: Идентификатор поставщика. `a` основной, `b` резервный.
+      schema:
+        type: string
+        enum: [a, b]
+
+  responses:
+    InvalidRequest:
+      description: Нарушен формат запроса
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error:
+              code: invalid_request
+              message: Поле amount обязательно и должно быть положительным целым числом
+
+  schemas:
+
+    Order:
+      type: object
+      required: [order_id, sku, amount, currency, status, created_at]
+      properties:
+        order_id:
+          type: string
+          description: Идентификатор вида `ord_<ULID>`, сортируемый по времени
+          example: ord_01M1V74GDR7FW5KKQYYK30X2RC
+        sku:
+          type: string
+          example: KEY-GTA5
+        amount:
+          type: integer
+          description: Сумма в целых единицах валюты
+          example: 1990
+        currency:
+          type: string
+          example: RUB
+        status:
+          type: string
+          enum: [created, paid, delivering, delivered, payment_failed, out_of_stock, delivery_failed]
+          description: |
+            Основной путь: `created` → `paid` → `delivering` → `delivered`.
+
+            Финальные состояния: `delivered`, `payment_failed`.
+
+            Восстановимые: `out_of_stock`, `delivery_failed` — фоновая задача
+            доводит их до выдачи после пополнения остатка либо восстановления
+            поставщика.
+        created_at:
+          type: string
+        delivery:
+          type: object
+          description: Присутствует только после успешной выдачи
+          properties:
+            code:
+              type: string
+              example: a-HHW6-4RX2-DX62
+            delivered_at:
+              type: string
+
+    CatalogItem:
+      type: object
+      properties:
+        sku:
+          type: string
+          example: KEY-GTA5
+        name:
+          type: string
+          example: GTA V ключ активации
+        type:
+          type: string
+          example: key
+        price:
+          type: number
+          example: 1990
+        currency:
+          type: string
+          example: RUB
+        available:
+          type: integer
+          description: Свободных кодов на складах поставщиков
+          example: 8
+
+    PaymentEvent:
+      type: object
+      required: [event_id, order_id, status, amount, currency, created_at]
+      properties:
+        event_id:
+          type: string
+          description: |
+            Уникален для события. Повторная доставка приходит с тем же
+            значением и не изменяет состояние.
+          example: evt_a1b2c3
+        order_id:
+          type: string
+          example: ord_01M1V74GDR7FW5KKQYYK30X2RC
+        status:
+          type: string
+          enum: [paid, failed]
+        amount:
+          type: integer
+          description: |
+            Целое число. Строка отклоняется: нестрогое сравнение пропустило бы
+            её в денежную логику.
+          example: 1990
+        currency:
+          type: string
+          example: RUB
+        created_at:
+          type: string
+          format: date-time
+          description: |
+            Время возникновения события у платёжной системы. Задаёт порядок
+            применения, не связанный с порядком доставки.
+          example: "2026-01-01T12:00:00Z"
+
+    ReconciliationReport:
+      type: object
+      properties:
+        generated_at:
+          type: string
+        healthy:
+          type: boolean
+        problems:
+          type: integer
+        summary:
+          type: object
+          properties:
+            orders: {type: integer}
+            delivered: {type: integer}
+            paid_not_delivered:
+              type: integer
+              description: Деньги получены, товар не отдан
+            delivered_not_paid:
+              type: integer
+              description: Товар отдан без подтверждённой оплаты
+            stuck_jobs:
+              type: integer
+              description: Задачи, взятые в работу и не завершённые
+            unresolved_deliveries:
+              type: integer
+              description: Обращения к поставщику без ответа
+            unapplied_events:
+              type: integer
+              description: События по ещё не существующим заказам
+            ledger_imbalanced:
+              type: integer
+              description: Проводки с суммой, отличной от нуля
+        ledger:
+          type: object
+          properties:
+            balances:
+              type: object
+              description: |
+                Баланс по счетам в минорных единицах. Сумма всех счетов
+                всегда равна нулю: журнал ведётся двойной записью.
+
+                `obligation` равен сумме оплаченных, но не выданных заказов.
+              example:
+                settlement: 21691000
+                obligation: 0
+                revenue: -21691000
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              description: Машиночитаемый код
+            message:
+              type: string
