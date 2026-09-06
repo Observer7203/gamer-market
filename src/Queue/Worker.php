@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Queue;
 
+use App\Database\Connection;
 use App\Services\DeliverOrder;
 use App\Support\Logger;
 use Throwable;
@@ -23,20 +24,58 @@ final class Worker
     private const MAX_ATTEMPTS = 8;
     private const IDLE_SLEEP_US = 200_000;
 
+    /** Пауза после сбоя соединения, растёт до минуты. */
+    private const RECONNECT_BASE_SECONDS = 1;
+    private const RECONNECT_MAX_SECONDS = 60;
+
     public function __construct(
         private readonly Queue $queue,
         private readonly DeliverOrder $deliverOrder,
+        private readonly Connection $db,
         private readonly Logger $logger,
     ) {
     }
 
+    /**
+     * Основной цикл.
+     *
+     * Недоступность базы не завершает процесс: соединение сбрасывается,
+     * пауза растёт, попытки продолжаются. Перезапуск базы или кратковременный
+     * разрыв связи не должны требовать перезапуска исполнителя.
+     */
     public function run(): void
     {
         $this->logger->info('worker_started', ['channel' => 'queue', 'pid' => getmypid()]);
 
+        $failures = 0;
+
         while (true) {
-            if (!$this->tick()) {
-                usleep(self::IDLE_SLEEP_US);
+            try {
+                $worked = $this->tick();
+                $failures = 0;
+
+                if (!$worked) {
+                    usleep(self::IDLE_SLEEP_US);
+                }
+            } catch (Throwable $e) {
+                $failures++;
+                $pause = min(
+                    self::RECONNECT_BASE_SECONDS * (2 ** ($failures - 1)),
+                    self::RECONNECT_MAX_SECONDS
+                );
+
+                $this->logger->error('worker_connection_lost', [
+                    'channel'   => 'queue',
+                    'exception' => $e::class,
+                    'message'   => $e->getMessage(),
+                    'failures'  => $failures,
+                    'retry_in'  => $pause,
+                ]);
+
+                // Дескриптор после разрыва непригоден: следующий запрос
+                // должен открыть новое соединение.
+                $this->db->disconnect();
+                sleep($pause);
             }
         }
     }

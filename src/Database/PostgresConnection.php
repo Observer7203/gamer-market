@@ -58,6 +58,12 @@ final class PostgresConnection implements Connection
         return $statement->rowCount();
     }
 
+    public function disconnect(): void
+    {
+        $this->pdo = null;
+        $this->depth = 0;
+    }
+
     public function raw(string $sql): void
     {
         $this->pdo()->exec($sql);

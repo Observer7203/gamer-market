@@ -18,6 +18,12 @@ $container = require dirname(__DIR__) . '/src/bootstrap.php';
 
 $healed = ($container->get(HealStuckOrders::class))();
 
+// Молчание при отсутствии работы: планировщик выполняет доводку каждую
+// минуту, и постоянный вывод забивал бы журнал контейнера.
+if (array_sum($healed) === 0 && !in_array('--verbose', $argv, true)) {
+    exit(0);
+}
+
 printf(
     "возвращено задач: %d, применено событий: %d, отправлено в очередь заказов: %d\n",
     $healed['released_jobs'],
