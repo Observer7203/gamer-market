@@ -7,6 +7,7 @@ use App\Database\Migrator;
 use App\Database\PostgresConnection;
 use App\Services\DeliverOrder;
 use App\Services\HttpProviderClient;
+use App\Services\Ledger;
 use App\Services\ProviderClient;
 use App\Http\Router;
 use App\Support\Container;
@@ -45,6 +46,7 @@ return (static function (): Container {
     $container->singleton(DeliverOrder::class, fn (Container $c): DeliverOrder => new DeliverOrder(
         $c->get(Connection::class),
         $c->get(ProviderClient::class),
+        $c->get(Ledger::class),
         $c->get(Logger::class),
         array_keys($config['provider']['endpoints']),
         $config['provider']['max_attempts'],

@@ -1,0 +1,26 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+use App\Services\HealStuckOrders;
+use App\Support\Container;
+
+/**
+ * Доводка заказов, не завершившихся самостоятельно.
+ *
+ * Запускается планировщиком раз в минуту. Все действия идемпотентны,
+ * повторный запуск ничего не удваивает.
+ */
+
+/** @var Container $container */
+$container = require dirname(__DIR__) . '/src/bootstrap.php';
+
+$healed = ($container->get(HealStuckOrders::class))();
+
+printf(
+    "возвращено задач: %d, применено событий: %d, отправлено в очередь заказов: %d\n",
+    $healed['released_jobs'],
+    $healed['applied_events'],
+    $healed['requeued_orders'],
+);

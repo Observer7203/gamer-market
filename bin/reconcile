@@ -1,0 +1,83 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+use App\Services\Reconciliation;
+use App\Support\Container;
+
+/**
+ * Отчёт сверки.
+ *
+ *   php bin/reconcile          читаемая сводка
+ *   php bin/reconcile --json   полный отчёт
+ *
+ * Ненулевой код возврата означает наличие расхождений.
+ */
+
+/** @var Container $container */
+$container = require dirname(__DIR__) . '/src/bootstrap.php';
+
+$report = $container->get(Reconciliation::class)->report();
+
+if (in_array('--json', $argv, true)) {
+    echo json_encode($report, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), "\n";
+    exit($report['healthy'] ? 0 : 1);
+}
+
+printf("Сверка на %s\n\n", $report['generated_at']);
+
+$titles = [
+    'orders'                => 'заказов всего',
+    'delivered'             => 'выдано',
+    'paid_not_delivered'    => 'оплачен, но не выдан',
+    'delivered_not_paid'    => 'выдан, но не оплачен',
+    'stuck_jobs'            => 'зависших задач',
+    'unresolved_deliveries' => 'выдач без ответа поставщика',
+    'unapplied_events'      => 'непринятых событий',
+    'ledger_imbalanced'     => 'несведённых проводок',
+];
+
+$pad = static fn (string $text, int $width): string
+    => $text . str_repeat(' ', max(1, $width - mb_strlen($text)));
+
+foreach ($report['summary'] as $key => $value) {
+    printf("  %s %s\n", $pad($titles[$key] ?? $key, 32), $value);
+}
+
+echo "\nБаланс журнала, минорные единицы:\n";
+
+$total = 0;
+foreach ($report['ledger']['balances'] as $account => $amount) {
+    printf("  %s %+d\n", $pad($account, 32), $amount);
+    $total += $amount;
+}
+printf("  %s %+d\n", $pad('сумма всех счетов', 32), $total);
+
+$sections = [
+    'paid_not_delivered'    => 'ОПЛАЧЕН, НО НЕ ВЫДАН',
+    'delivered_not_paid'    => 'ВЫДАН, НО НЕ ОПЛАЧЕН',
+    'stuck_jobs'            => 'ЗАВИСШИЕ ЗАДАЧИ',
+    'unresolved_deliveries' => 'ВЫДАЧИ БЕЗ ОТВЕТА ПОСТАВЩИКА',
+    'unapplied_events'      => 'НЕПРИНЯТЫЕ СОБЫТИЯ',
+    'ledger_imbalanced'     => 'НЕСВЕДЁННЫЕ ПРОВОДКИ',
+];
+
+foreach ($sections as $key => $title) {
+    if ($report[$key] === []) {
+        continue;
+    }
+
+    printf("\n%s\n", $title);
+
+    foreach ($report[$key] as $row) {
+        printf("  %s\n", json_encode($row, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+    }
+}
+
+printf(
+    "\n%s\n",
+    $report['healthy'] ? 'Расхождений нет.' : sprintf('Расхождений: %d.', $report['problems'])
+);
+
+exit($report['healthy'] ? 0 : 1);

@@ -32,7 +32,7 @@ final class Worker
 
     public function run(): void
     {
-        $this->logger->info('worker_started', ['pid' => getmypid()]);
+        $this->logger->info('worker_started', ['channel' => 'queue', 'pid' => getmypid()]);
 
         while (true) {
             if (!$this->tick()) {
@@ -66,6 +66,7 @@ final class Worker
             }
         } catch (Throwable $e) {
             $this->logger->error('job_failed', [
+                'channel'   => 'queue',
                 'job_id'    => $id,
                 'type'      => $job['type'],
                 'exception' => $e::class,
@@ -86,7 +87,7 @@ final class Worker
 
         if ($attempts >= self::MAX_ATTEMPTS) {
             $this->queue->fail($id, $error);
-            $this->logger->error('job_exhausted', ['job_id' => $id, 'attempts' => $attempts]);
+            $this->logger->error('job_exhausted', ['channel' => 'queue', 'job_id' => $id, 'attempts' => $attempts]);
 
             return;
         }
@@ -95,6 +96,7 @@ final class Worker
         $this->queue->retry($id, $error, $delay);
 
         $this->logger->info('job_rescheduled', [
+            'channel'  => 'queue',
             'job_id'   => $id,
             'attempts' => $attempts,
             'delay_s'  => $delay,

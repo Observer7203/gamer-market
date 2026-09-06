@@ -37,6 +37,7 @@ final class PaymentWebhookController
             $outcome = ($this->handle)($request->json);
         } catch (Throwable $e) {
             $this->logger->error('webhook_failed', [
+                'channel'   => 'payment',
                 'event_id'  => $request->input('event_id'),
                 'order_id'  => $request->input('order_id'),
                 'exception' => $e::class,

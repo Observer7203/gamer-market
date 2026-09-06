@@ -35,6 +35,7 @@ final class DeliverOrder
     public function __construct(
         private readonly Connection $db,
         private readonly ProviderClient $provider,
+        private readonly Ledger $ledger,
         private readonly Logger $logger,
         private readonly array $providers = ['a', 'b'],
         private readonly int $maxAttempts = 3,
@@ -48,7 +49,7 @@ final class DeliverOrder
         $claim = $this->claim($orderId);
 
         if ($claim === null) {
-            $this->logger->info('delivery_skipped', ['order_id' => $orderId]);
+            $this->logger->info('delivery_skipped', ['channel' => 'delivery', 'order_id' => $orderId]);
 
             return 'noop';
         }
@@ -106,6 +107,7 @@ final class DeliverOrder
             // текущий. Задача вернётся в очередь и повторит обращение
             // к нему же с тем же идентификатором.
             $this->logger->error('delivery_unresolved', [
+                'channel'    => 'delivery',
                 'order_id'   => $orderId,
                 'provider'   => $provider,
                 'request_id' => $requestId,
@@ -185,7 +187,16 @@ final class DeliverOrder
                     [Order::DELIVERED, $orderId]
                 );
 
+                // Обязательство перед покупателем исполнено: выручка признана.
+                $order = $db->selectOne('SELECT price_minor, currency FROM orders WHERE id = ?', [$orderId]);
+                $this->ledger->recordDelivery(
+                    $orderId,
+                    (int) $order['price_minor'],
+                    (string) $order['currency'],
+                );
+
                 $this->logger->info('order_delivered', [
+                    'channel'    => 'delivery',
                     'order_id'   => $orderId,
                     'provider'   => $result['provider'],
                     'request_id' => $result['request_id'],
@@ -229,6 +240,7 @@ final class DeliverOrder
             $db->execute('UPDATE orders SET status = ? WHERE id = ?', [$orderStatus, $orderId]);
 
             $this->logger->error('delivery_failed', [
+                'channel'    => 'delivery',
                 'order_id'   => $orderId,
                 'provider'   => $result['provider'],
                 'request_id' => $result['request_id'],

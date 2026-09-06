@@ -8,6 +8,7 @@ use App\Database\Connection;
 use App\Models\Order;
 use App\Models\PaymentEvent;
 use App\Queue\Queue;
+use App\Services\Ledger;
 use App\Support\Logger;
 
 /**
@@ -24,6 +25,7 @@ final class ApplyPaymentEvents
     public function __construct(
         private readonly Connection $db,
         private readonly Queue $queue,
+        private readonly Ledger $ledger,
         private readonly Logger $logger,
     ) {
     }
@@ -79,9 +81,17 @@ final class ApplyPaymentEvents
                 [Order::PAID, $order->id]
             );
 
-            // Задача создаётся той же транзакцией, что и смена статуса:
-            // состояние «оплачен, но задачи нет» недостижимо.
+            // Задача и проводка создаются той же транзакцией, что и смена
+            // статуса: состояния «оплачен, но задачи нет» и «оплачен,
+            // но в журнале пусто» недостижимы.
             $this->queue->push('deliver_order', ['order_id' => $order->id]);
+
+            $this->ledger->recordPayment(
+                $order->id,
+                $event->eventId,
+                $event->amountMinor,
+                $event->currency,
+            );
         } else {
             $this->db->execute('UPDATE orders SET status = ? WHERE id = ?', [Order::PAYMENT_FAILED, $order->id]);
         }
@@ -111,6 +121,7 @@ final class ApplyPaymentEvents
         );
 
         $this->logger->info('payment_event_applied', [
+            'channel'  => 'payment',
             'event_id' => $event->eventId,
             'order_id' => $event->orderId,
             'status'   => $event->status,

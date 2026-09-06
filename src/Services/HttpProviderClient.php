@@ -67,6 +67,7 @@ final class HttpProviderClient implements ProviderClient
         $result['latency_ms'] = (int) round((microtime(true) - $startedAt) * 1000);
 
         $this->logger->info('provider_request', [
+            'channel'    => 'delivery',
             'provider'   => $provider,
             'request_id' => $requestId,
             'order_id'   => $orderId,

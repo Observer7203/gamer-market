@@ -5,6 +5,7 @@ declare(strict_types=1);
 use App\Controllers\HealthController;
 use App\Controllers\OrderController;
 use App\Controllers\PaymentWebhookController;
+use App\Controllers\ReconciliationController;
 use App\Http\Router;
 use App\Controllers\ProviderStubController;
 
@@ -19,6 +20,9 @@ return static function (Router $router): void {
     $router->get('/api/orders/{id}', [OrderController::class, 'show']);
 
     $router->post('/api/webhooks/payment', [PaymentWebhookController::class, 'store']);
+
+    // Сверка: расхождения между полученными деньгами и выданным товаром.
+    $router->get('/api/admin/reconciliation', [ReconciliationController::class, 'show']);
 
     // Заглушка поставщика: отдельный сервис, размещённый в том же приложении
     // ради простоты запуска.

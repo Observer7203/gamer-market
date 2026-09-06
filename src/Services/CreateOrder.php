@@ -51,6 +51,7 @@ final class CreateOrder
             $order = Order::fromRow($db->selectOne('SELECT * FROM orders WHERE id = ?', [$id]) ?? []);
 
             $this->logger->info('order_created', [
+                'channel'      => 'order',
                 'order_id'     => $order->id,
                 'sku'          => $order->sku,
                 'amount_minor' => $order->priceMinor,
