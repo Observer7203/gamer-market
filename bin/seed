@@ -20,6 +20,10 @@ $root = dirname(__DIR__);
 $catalog = json_decode((string) file_get_contents($root . '/data/products.json'), true);
 $keys = json_decode((string) file_get_contents($root . '/data/keys.json'), true)['keys'];
 
+$options = getopt('', ['scale::', 'codes-per-sku::']);
+$scale = max(0, (int) ($options['scale'] ?? 0));
+$codesPerSku = max(1, (int) ($options['codes-per-sku'] ?? 40));
+
 $db->transaction(function (Connection $db) use ($catalog, $keys): void {
     foreach ($catalog['products'] as $product) {
         $db->execute(
@@ -58,9 +62,75 @@ $db->transaction(function (Connection $db) use ($catalog, $keys): void {
     }
 });
 
+// Синтетический каталог для проверки витрины под нагрузкой. На десятке
+// позиций планировщик игнорирует любой индекс: последовательное чтение
+// таблицы обходится дешевле, и разница между планами не проявляется.
+if ($scale > 0) {
+    generateCatalog($db, $catalog['products'], $scale, $codesPerSku);
+}
+
 printf(
     "каталог: %d позиций, склад поставщика a: %d кодов, поставщика b: %d кодов\n",
     (int) $db->selectOne('SELECT count(*) AS n FROM products')['n'],
     (int) $db->selectOne("SELECT count(*) AS n FROM provider_stock WHERE provider = 'a'")['n'],
     (int) $db->selectOne("SELECT count(*) AS n FROM provider_stock WHERE provider = 'b'")['n'],
 );
+
+
+/**
+ * Генерация синтетического каталога.
+ *
+ * @param list<array<string, mixed>> $templates
+ */
+function generateCatalog(Connection $db, array $templates, int $scale, int $codesPerSku): void
+{
+    $platforms = ['Steam', 'Epic Games', 'Origin', 'Uplay', 'Battle.net', 'GOG',
+                  'PlayStation', 'Xbox', 'Nintendo', 'Rockstar'];
+    $editions  = ['Standard', 'Deluxe', 'Ultimate', 'Gold', 'Complete', 'Anniversary'];
+    $types     = ['key', 'topup', 'subscription', 'giftcard'];
+
+    $started = microtime(true);
+
+    $db->transaction(function (Connection $db) use ($scale, $codesPerSku, $platforms, $editions, $types): void {
+        for ($i = 1; $i <= $scale; $i++) {
+            $type = $types[$i % count($types)];
+            $sku = sprintf('GEN-%s-%05d', strtoupper(substr($type, 0, 4)), $i);
+
+            $db->execute(
+                'INSERT INTO products (sku, name, type, price_minor, currency, sort_rank, is_active)
+                      VALUES (?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT (sku) DO NOTHING',
+                [
+                    $sku,
+                    sprintf('%s %s Edition #%d', $platforms[$i % count($platforms)],
+                            $editions[$i % count($editions)], $i),
+                    $type,
+                    (($i * 37) % 4900 + 100) * 100,
+                    'RUB',
+                    $scale - $i,
+                    // Каждая двадцатая позиция снята с продажи: индекс витрины
+                    // частичный, и такие строки в него попадать не должны.
+                    // Логическое значение передаётся числом: PDO приводит
+                    // false к пустой строке, которую PostgreSQL не принимает.
+                    $i % 20 !== 0 ? 1 : 0,
+                ]
+            );
+
+            // Часть позиций остаётся без остатка: витрина обязана показывать
+            // и их, а отбор по наличию — отсекать.
+            $codes = $i % 7 === 0 ? 0 : $codesPerSku;
+
+            for ($k = 1; $k <= $codes; $k++) {
+                foreach (['a', 'b'] as $provider) {
+                    $db->execute(
+                        'INSERT INTO provider_stock (provider, sku, code) VALUES (?, ?, ?)
+                         ON CONFLICT (provider, code) DO NOTHING',
+                        [$provider, $sku, sprintf('%s-%s-%04d', $provider, $sku, $k)]
+                    );
+                }
+            }
+        }
+    });
+
+    printf("сгенерировано позиций: %d за %.1f с\n", $scale, microtime(true) - $started);
+}

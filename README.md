@@ -38,7 +38,7 @@ curl http://localhost:8080/health
 docker compose exec app vendor/bin/phpunit
 ```
 
-85 тестов на отдельной базе `gamer_market_test`. Данные разработки
+97 тестов на отдельной базе `gamer_market_test`. Данные разработки
 не затрагиваются.
 
 Проверка exactly-once под конкуренцией и устойчивости интеграций:
@@ -53,6 +53,13 @@ docker compose exec app php bin/failover --repeat=3
 ```bash
 docker compose exec app php bin/reconcile
 curl -s http://localhost:8080/api/admin/reconciliation
+```
+
+Каталог под нагрузкой:
+
+```bash
+docker compose exec app php bin/seed --scale=5000
+docker compose exec app php bin/explain
 ```
 
 ## Проверка вручную
@@ -78,7 +85,7 @@ curl http://localhost:8080/api/orders/ord_...
 
 ```
 bin/            точки входа CLI: migrate, seed, worker, heal, reconcile,
-                pay, race, failover
+                explain, pay, race, failover
 config/         config.php (единственный читатель окружения), routes.php
 data/           каталог товаров и пул ключей
 docker/         nginx + php-fpm
@@ -120,7 +127,7 @@ tests/
 - [x] **2.** Exactly-once под гонками, тест на 50 параллельных вебхуков
 - [x] **3.** Два поставщика, таймауты, бэкофф, fallback A→B, обработка `unknown`
 - [x] **4.** Структурные логи, сверка, healer зависших заказов, журнал денег
-- [ ] **5.** Каталог под нагрузкой: схема, индексы, план выполнения
+- [x] **5.** Каталог под нагрузкой: схема, индексы, план выполнения
 
 ## Документация
 
@@ -129,6 +136,8 @@ tests/
   машина состояний, схема данных
 - **[Схема данных](docs/SCHEMA.txt)** — принятые решения, инварианты
   и что схема запрещает физически
+- **[Проверка этапа 5](docs/CHECK_STAGE_5.txt)** — витрина на тысячах позиций,
+  покрывающие индексы, план выполнения, постраничный вывод по ключу
 - **[Проверка этапа 4](docs/CHECK_STAGE_4.txt)** — сверка, фоновая доводка,
   журнал денежных движений двойной записью
 - **[Проверка этапа 3](docs/CHECK_STAGE_3.txt)** — два поставщика, повторы,

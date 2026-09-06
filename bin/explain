@@ -1,0 +1,137 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+use App\Database\Connection;
+use App\Support\Container;
+
+/**
+ * Сравнение планов выполнения запроса витрины.
+ *
+ * Показывает разницу между подсчётом остатка на лету и чтением из
+ * денормализованной колонки, а также между постраничным выводом
+ * смещением и по ключу.
+ *
+ *   php bin/explain
+ *   php bin/explain --full   полные планы вместо сводки
+ */
+
+/** @var Container $container */
+$container = require dirname(__DIR__) . '/src/bootstrap.php';
+$db = $container->get(Connection::class);
+
+$full = in_array('--full', $argv, true);
+
+$catalogSize = (int) $db->selectOne('SELECT count(*) AS n FROM products')['n'];
+$stockSize   = (int) $db->selectOne('SELECT count(*) AS n FROM provider_stock')['n'];
+
+printf("Каталог: %d позиций, склад: %d кодов\n", $catalogSize, $stockSize);
+
+if ($catalogSize < 1000) {
+    printf("\nВНИМАНИЕ: на таком объёме планировщик игнорирует индексы —\n");
+    printf("последовательное чтение обходится дешевле. Наполните каталог:\n");
+    printf("  php bin/seed --scale=5000\n\n");
+}
+
+// Свежая статистика: без неё планировщик опирается на устаревшие оценки.
+$db->raw('VACUUM ANALYZE products');
+$db->raw('ANALYZE provider_stock');
+
+$cases = [
+    [
+        'Остаток подсчётом на лету',
+        'Коррелированный подзапрос выполняется для каждой строки-кандидата',
+        "SELECT p.sku, p.name, p.price_minor,
+                (SELECT count(*) FROM provider_stock s
+                  WHERE s.sku = p.sku AND s.request_id IS NULL) AS available
+           FROM products p
+          WHERE p.is_active
+          ORDER BY p.sort_rank DESC
+          LIMIT 20",
+    ],
+    [
+        'Остаток из денормализованной колонки',
+        'Сканирование только по индексу, обращений к таблице нет',
+        "SELECT sku, name, type, price_minor, currency, available_count
+           FROM products
+          WHERE is_active
+          ORDER BY sort_rank DESC, sku DESC
+          LIMIT 20",
+    ],
+    [
+        'Раздел витрины по типу',
+        'Тип входит в ключ второго индекса',
+        "SELECT sku, name, price_minor, available_count
+           FROM products
+          WHERE is_active AND type = 'key'
+          ORDER BY sort_rank DESC, sku DESC
+          LIMIT 20",
+    ],
+    [
+        'Глубокая страница смещением',
+        'Отброшенные строки всё равно читаются и сортируются',
+        "SELECT sku, name, price_minor, available_count
+           FROM products
+          WHERE is_active
+          ORDER BY sort_rank DESC, sku DESC
+          LIMIT 20 OFFSET 4000",
+    ],
+    [
+        'Глубокая страница по ключу',
+        'Позиция задаётся парой значений, чтение начинается сразу с неё',
+        "SELECT sku, name, price_minor, available_count
+           FROM products
+          WHERE is_active AND (sort_rank, sku) < (1000, 'zzz')
+          ORDER BY sort_rank DESC, sku DESC
+          LIMIT 20",
+    ],
+];
+
+foreach ($cases as [$title, $note, $sql]) {
+    printf("\n%s\n%s\n%s\n", str_repeat('─', 78), $title, $note);
+
+    $plan = array_column($db->select('EXPLAIN (ANALYZE, BUFFERS, COSTS OFF) ' . $sql), 'QUERY PLAN');
+    $text = implode("\n", $plan);
+
+    if ($full) {
+        printf("\n%s\n", $text);
+        continue;
+    }
+
+    printf(
+        "\n  время          %s\n  буферов        %s\n  обращений к таблице %s\n  метод          %s\n",
+        extract_value($text, '/Execution Time: ([\d.]+) ms/', '%s мс'),
+        totalBuffers($text),
+        extract_value($text, '/Heap Fetches: (\d+)/', '%s'),
+        scanMethod($text),
+    );
+}
+
+printf("\n%s\nПолные планы: php bin/explain --full\n", str_repeat('─', 78));
+
+
+function extract_value(string $text, string $pattern, string $format): string
+{
+    return preg_match($pattern, $text, $m) === 1 ? sprintf($format, $m[1]) : '—';
+}
+
+function totalBuffers(string $text): string
+{
+    preg_match_all('/Buffers: shared hit=(\d+)/', $text, $m);
+
+    // Первое значение относится к плану целиком, остальные вложены в него.
+    return $m[1] === [] ? '—' : (string) max(array_map('intval', $m[1]));
+}
+
+function scanMethod(string $text): string
+{
+    return match (true) {
+        str_contains($text, 'Seq Scan')        => 'последовательное чтение',
+        str_contains($text, 'SubPlan')         => 'сканирование по индексу с подзапросом',
+        str_contains($text, 'Sort')            => 'сортировка',
+        str_contains($text, 'Index Only Scan') => 'сканирование только по индексу',
+        str_contains($text, 'Index Scan')      => 'сканирование по индексу',
+        default                                => 'неизвестно',
+    };
+}

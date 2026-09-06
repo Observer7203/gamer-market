@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use App\Controllers\CatalogController;
 use App\Controllers\HealthController;
 use App\Controllers\OrderController;
 use App\Controllers\PaymentWebhookController;
@@ -15,6 +16,9 @@ use App\Controllers\ProviderStubController;
 return static function (Router $router): void {
 
     $router->get('/health', [HealthController::class, 'show']);
+
+    // Витрина: самый частый запрос системы.
+    $router->get('/api/catalog', [CatalogController::class, 'show']);
 
     $router->post('/api/orders', [OrderController::class, 'store']);
     $router->get('/api/orders/{id}', [OrderController::class, 'show']);
