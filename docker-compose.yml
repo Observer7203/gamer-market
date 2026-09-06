@@ -2,6 +2,9 @@ services:
 
   db:
     image: postgres:16-alpine
+    # Проверка конкуренции порождает полсотни процессов, каждый со своим
+    # подключением; значения по умолчанию для этого недостаточно.
+    command: postgres -c max_connections=300
     environment:
       POSTGRES_DB: gamer_market
       POSTGRES_USER: gamer
