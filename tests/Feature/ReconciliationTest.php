@@ -108,7 +108,7 @@ final class ReconciliationTest extends TestCase
             [$order['order_id']]
         );
 
-        self::assertSame(1, $this->heal()['requeued_orders']);
+        self::assertSame(1, $this->heal()['requeued_items']);
         self::assertSame(1, $this->rows('jobs'));
 
         $this->runWorker();
@@ -122,10 +122,17 @@ final class ReconciliationTest extends TestCase
         $this->request('POST', '/api/webhooks/payment', $this->paymentEvent($futureId));
         self::assertSame(1, $this->report()['summary']['unapplied_events']);
 
-        $this->db->execute(
-            'INSERT INTO orders (id, sku, price_minor, currency, status) VALUES (?, ?, ?, ?, ?)',
-            [$futureId, 'KEY-GTA5', 199000, 'RUB', 'created']
-        );
+        $this->db->transaction(function () use ($futureId): void {
+            $this->db->execute(
+                'INSERT INTO orders (id, price_minor, currency, status) VALUES (?, ?, ?, ?)',
+                [$futureId, 199000, 'RUB', 'created']
+            );
+            $this->db->execute(
+                'INSERT INTO order_items (order_id, position, sku, price_minor, currency, status)
+                      VALUES (?, ?, ?, ?, ?, ?)',
+                [$futureId, 1, 'KEY-GTA5', 199000, 'RUB', 'pending']
+            );
+        });
 
         self::assertSame(1, $this->heal()['applied_events']);
         self::assertSame('paid', $this->orderStatus($futureId));
@@ -139,8 +146,8 @@ final class ReconciliationTest extends TestCase
         $first = $this->heal();
         $second = $this->heal();
 
-        self::assertSame([0, 0, 0], array_values($first));
-        self::assertSame([0, 0, 0], array_values($second));
+        self::assertSame([0, 0, 0, 0, 0], array_values($first));
+        self::assertSame([0, 0, 0, 0, 0], array_values($second));
         self::assertSame(1, $this->rows('deliveries'));
         self::assertSame(4, $this->rows('ledger_entries'));
         self::assertTrue($this->report()['healthy']);

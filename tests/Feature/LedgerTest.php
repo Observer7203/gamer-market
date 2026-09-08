@@ -24,6 +24,24 @@ final class LedgerTest extends TestCase
         return $this->ledger()->balances();
     }
 
+    /** Заказ из одной позиции, которую невозможно выдать: деньги возвращаются. */
+    private function refundedOrder(): string
+    {
+        $this->db->raw('TRUNCATE provider_stock');
+
+        $order = $this->createOrder();
+        $this->request('POST', '/api/webhooks/payment', $this->paymentEvent($order['order_id']));
+        $this->runWorker();
+
+        // Бюджет попыток исчерпывается прямыми вызовами: в очереди задача
+        // ждала бы отсрочки.
+        $deliver = $this->container->get(\App\Services\DeliverOrderItem::class);
+        $deliver($order['order_id'], 1);
+        $deliver($order['order_id'], 1);
+
+        return $order['order_id'];
+    }
+
     private function deliverPaidOrder(): string
     {
         $order = $this->createOrder();
@@ -85,10 +103,59 @@ final class LedgerTest extends TestCase
     {
         $orderId = $this->deliverPaidOrder();
 
-        ($this->container->get(\App\Services\DeliverOrder::class))($orderId);
+        ($this->container->get(\App\Services\DeliverOrderItem::class))($orderId, 1);
 
         self::assertSame(4, $this->rows('ledger_entries'));
         self::assertSame(0, array_sum($this->balances()));
+    }
+
+    public function testВозвратЗакрываетОбязательство(): void
+    {
+        $orderId = $this->refundedOrder();
+
+        $balances = $this->balances();
+
+        self::assertSame(199000, $balances[Ledger::SETTLEMENT]);
+        self::assertSame(0, $balances[Ledger::OBLIGATION], 'обязательство исполнено деньгами');
+        self::assertSame(-199000, $balances[Ledger::REFUND]);
+        self::assertSame(0, array_sum($balances));
+        self::assertSame(\App\Models\Order::REFUNDED, $this->orderStatus($orderId));
+    }
+
+    public function testПовторВозвратаНеУдваиваетПроводку(): void
+    {
+        $orderId = $this->refundedOrder();
+
+        $repeated = ($this->container->get(\App\Services\RefundItem::class))($orderId, 1);
+
+        self::assertFalse($repeated, 'позиция уже возвращена');
+        self::assertSame(4, $this->rows('ledger_entries'));
+        self::assertSame(0, array_sum($this->balances()));
+    }
+
+    public function testДеньгиСходятсяПриЧастичнойВыдаче(): void
+    {
+        $this->seedProduct('KEY-NOSTOCK', 50000, 0);
+
+        $order = $this->createOrderWith(['KEY-GTA5', 'KEY-NOSTOCK']);
+        $this->request('POST', '/api/webhooks/payment', $this->paymentEvent(
+            $order['order_id'],
+            ['amount' => 2490]
+        ));
+        $this->runWorker();
+
+        // Позиция без остатка добирает попытки и возвращается покупателю
+        $deliver = $this->container->get(\App\Services\DeliverOrderItem::class);
+        $deliver($order['order_id'], 2);
+        $deliver($order['order_id'], 2);
+
+        $balances = $this->balances();
+
+        self::assertSame(249000, $balances[Ledger::SETTLEMENT]);
+        self::assertSame(-199000, $balances[Ledger::REVENUE]);
+        self::assertSame(-50000, $balances[Ledger::REFUND]);
+        self::assertSame(0, $balances[Ledger::OBLIGATION]);
+        self::assertSame(0, array_sum($balances), 'оплачено = выдано + возвращено');
     }
 
     public function testНесбалансированнаяПроводкаНеФиксируется(): void

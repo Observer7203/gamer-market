@@ -81,10 +81,18 @@ final class ApplyPaymentEvents
                 [Order::PAID, $order->id]
             );
 
-            // Задача и проводка создаются той же транзакцией, что и смена
+            // Задачи и проводка создаются той же транзакцией, что и смена
             // статуса: состояния «оплачен, но задачи нет» и «оплачен,
             // но в журнале пусто» недостижимы.
-            $this->queue->push('deliver_order', ['order_id' => $order->id]);
+            //
+            // На каждую позицию своя задача: они выполняются независимо
+            // и провал одной не мешает остальным.
+            foreach ($this->positions($order->id) as $position) {
+                $this->queue->push('deliver_item', [
+                    'order_id' => $order->id,
+                    'position' => $position,
+                ]);
+            }
 
             $this->ledger->recordPayment(
                 $order->id,
@@ -97,6 +105,15 @@ final class ApplyPaymentEvents
         }
 
         return $this->finish($event, 'applied');
+    }
+
+    /** @return list<int> номера позиций заказа */
+    private function positions(string $orderId): array
+    {
+        return array_map(
+            static fn (array $row): int => (int) $row['position'],
+            $this->db->select('SELECT position FROM order_items WHERE order_id = ? ORDER BY position', [$orderId])
+        );
     }
 
     /** Есть ли уже применённое событие, созданное позже этого. */

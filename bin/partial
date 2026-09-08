@@ -1,0 +1,452 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+use App\Database\Connection;
+use App\Models\Delivery;
+use App\Services\DeliverOrderItem;
+use App\Services\HealStuckOrders;
+use App\Services\Ledger;
+use App\Support\Container;
+
+/**
+ * Воспроизводимая проверка заказа, часть позиций которого выдать невозможно.
+ *
+ * Заказ собирается из товара, который есть на складе, и товара, которого нет
+ * ни у одного поставщика. Проверяется, что выданное осталось у покупателя,
+ * за невыданное вернулись деньги, деньги сошлись, а повтор всех шагов ничего
+ * не изменил.
+ *
+ * Отдельный сценарий обрывает выдачу посреди работы и проверяет, что заказ
+ * всё равно приходит в конечное состояние.
+ *
+ * Ненулевой код возврата означает нарушение.
+ *
+ *   php bin/partial
+ *   php bin/partial --scenario=crash
+ *   php bin/partial --repeat=3
+ */
+
+/** @var Container $container */
+$container = require dirname(__DIR__) . '/src/bootstrap.php';
+$db = $container->get(Connection::class);
+
+$options = getopt('', ['scenario::', 'repeat::', 'url::']);
+$repeat  = max(1, (int) ($options['repeat'] ?? 1));
+$base    = rtrim($options['url'] ?? (getenv('APP_URL') ?: 'http://nginx'), '/');
+$only    = $options['scenario'] ?? null;
+
+const IN_STOCK = 'KEY-PARTIAL-OK';
+const SOLD_OUT = 'KEY-PARTIAL-OUT';
+
+$scenarios = [
+    'partial'  => ['часть позиций выдана, за остальные возвращены деньги', 'partial'],
+    'repeat'   => ['повтор всех шагов ничего не меняет', 'repeatSteps'],
+    'crash'    => ['обрыв посреди выдачи, заказ доводится восстановителем', 'crash'],
+    'all_fail' => ['ни одна позиция не выдана, возвращено всё', 'allFail'],
+];
+
+printf("Проверка частичной выдачи\n  повторов: %d\n\n", $repeat);
+
+prepareCatalog($db);
+
+$failed = 0;
+$checks = 0;
+
+foreach ($scenarios as $name => [$title, $handler]) {
+    if ($only !== null && $only !== $name) {
+        continue;
+    }
+
+    printf("── %s\n", $title);
+
+    for ($run = 1; $run <= $repeat; $run++) {
+        topUpStock($db);
+
+        $result = $handler($container, $db, $base);
+        $checks += count($result['checks']);
+        $broken = array_filter($result['checks'], static fn (bool $ok): bool => !$ok);
+
+        if ($broken !== []) {
+            $failed++;
+            printf("  %2d/%d  НАРУШЕНО\n", $run, $repeat);
+            foreach (array_keys($broken) as $check) {
+                printf("         %s\n", $check);
+            }
+            printf("         факт: %s\n", json_encode($result['facts'], JSON_UNESCAPED_UNICODE));
+            continue;
+        }
+
+        printf("  %2d/%d  ок   %s\n", $run, $repeat, json_encode($result['facts'], JSON_UNESCAPED_UNICODE));
+    }
+
+    echo "\n";
+}
+
+printf("Проверок: %d, нарушений: %d\n", $checks, $failed);
+exit($failed === 0 ? 0 : 1);
+
+
+// ── сценарии ────────────────────────────────────────────────────────────────
+
+/**
+ * Заказ из трёх позиций, средняя из которых недоступна.
+ *
+ * @return array{checks: array<string, bool>, facts: array<string, mixed>}
+ */
+function partial(Container $c, Connection $db, string $base): array
+{
+    $orderId = settledOrder($c, $base, [IN_STOCK, SOLD_OUT, IN_STOCK]);
+    $state = inspect($db, $c, $orderId);
+
+    return [
+        'facts'  => $state,
+        'checks' => [
+            'выданное осталось у покупателя'  => $state['позиции'][1] === 'delivered'
+                                              && $state['позиции'][3] === 'delivered',
+            'за невыданное вернулись деньги'  => $state['позиции'][2] === 'refunded',
+            'коды выданы только за выданное'  => $state['кодов'] === 2,
+            'заказ в конечном состоянии'      => $state['статус'] === 'partially_delivered',
+            'деньги сходятся'                 => $state['деньги']['сходится'],
+            'возвращена цена одной позиции'   => $state['деньги']['возвращено'] === $state['цена_позиции'],
+        ],
+    ];
+}
+
+/**
+ * Повтор всех шагов: оплата, выдача, возврат, доводка.
+ *
+ * @return array{checks: array<string, bool>, facts: array<string, mixed>}
+ */
+function repeatSteps(Container $c, Connection $db, string $base): array
+{
+    $orderId = settledOrder($c, $base, [IN_STOCK, SOLD_OUT]);
+    $before = inspect($db, $c, $orderId);
+
+    // Повторная доставка того же платёжного события.
+    pay($base, $orderId, $before['сумма']);
+
+    // Повторная выдача и повторный возврат по каждой позиции.
+    $deliver = $c->get(DeliverOrderItem::class);
+    $refund = $c->get(App\Services\RefundItem::class);
+
+    foreach ([1, 2] as $position) {
+        $deliver($orderId, $position);
+        $refund($orderId, $position);
+    }
+
+    ($c->get(App\Services\FinalizeOrder::class))($orderId);
+    ($c->get(HealStuckOrders::class))();
+
+    $after = inspect($db, $c, $orderId);
+
+    return [
+        'facts'  => ['до' => $before['деньги'], 'после' => $after['деньги'], 'кодов' => $after['кодов']],
+        'checks' => [
+            'состояния позиций не изменились' => $before['позиции'] === $after['позиции'],
+            'статус заказа не изменился'      => $before['статус'] === $after['статус'],
+            'лишних кодов не выдано'          => $before['кодов'] === $after['кодов'],
+            'движения денег не изменились'    => $before['деньги'] === $after['деньги'],
+            'деньги сходятся'                 => $after['деньги']['сходится'],
+        ],
+    ];
+}
+
+/**
+ * Обрыв процесса посреди выдачи.
+ *
+ * Позиция остаётся занятой навсегда, если её никто не освободит: строка
+ * выдачи помечена как выполняющаяся, а исполнителя больше нет.
+ *
+ * @return array{checks: array<string, bool>, facts: array<string, mixed>}
+ */
+function crash(Container $c, Connection $db, string $base): array
+{
+    $orderId = createOrder($base, [IN_STOCK, IN_STOCK]);
+
+    // Оплата и удаление задач одной транзакцией: фоновый исполнитель
+    // не увидит незафиксированных строк и не перехватит работу,
+    // которую сценарий обрывает намеренно.
+    payWithoutQueue($c, $db, $orderId, price($db, IN_STOCK) * 2);
+
+    // Первая позиция выдана, вторая оборвана посреди обращения к поставщику.
+    ($c->get(DeliverOrderItem::class))($orderId, 1);
+
+    $db->execute(
+        'INSERT INTO deliveries (order_id, position, status, claimed_at)
+              VALUES (?, 2, ?, now() - interval \'1 hour\')
+         ON CONFLICT (order_id, position) DO UPDATE
+            SET status = excluded.status, claimed_at = excluded.claimed_at',
+        [$orderId, Delivery::IN_FLIGHT]
+    );
+    $db->execute(
+        "UPDATE order_items SET status = 'delivering' WHERE order_id = ? AND position = 2",
+        [$orderId]
+    );
+
+    $stuck = inspect($db, $c, $orderId);
+
+    // Восстановитель освобождает позицию и возвращает её в очередь.
+    $db->execute("UPDATE orders SET paid_at = now() - interval '1 hour' WHERE id = ?", [$orderId]);
+    $healed = ($c->get(HealStuckOrders::class))();
+    drainQueue($c);
+
+    $final = inspect($db, $c, $orderId);
+
+    return [
+        'facts'  => ['после обрыва' => $stuck['позиции'], 'доводка' => $healed,
+                     'итог' => $final['позиции'], 'статус' => $final['статус']],
+        'checks' => [
+            'позиция освобождена'          => $healed['released_items'] > 0,
+            'позиция возвращена в очередь' => $healed['requeued_items'] > 0,
+            'обе позиции выданы'           => $final['позиции'] === [1 => 'delivered', 2 => 'delivered'],
+            'заказ в конечном состоянии'   => $final['статус'] === 'delivered',
+            'кодов ровно два'              => $final['кодов'] === 2,
+            'деньги сходятся'              => $final['деньги']['сходится'],
+        ],
+    ];
+}
+
+/**
+ * Ни одну позицию выдать невозможно: заказ возвращается целиком.
+ *
+ * @return array{checks: array<string, bool>, facts: array<string, mixed>}
+ */
+function allFail(Container $c, Connection $db, string $base): array
+{
+    $orderId = settledOrder($c, $base, [SOLD_OUT, SOLD_OUT]);
+    $state = inspect($db, $c, $orderId);
+
+    return [
+        'facts'  => $state,
+        'checks' => [
+            'обе позиции возвращены'     => $state['позиции'] === [1 => 'refunded', 2 => 'refunded'],
+            'кодов не выдано'            => $state['кодов'] === 0,
+            'заказ в конечном состоянии' => $state['статус'] === 'refunded',
+            'возвращена вся сумма'       => $state['деньги']['возвращено'] === $state['деньги']['оплачено'],
+            'деньги сходятся'            => $state['деньги']['сходится'],
+        ],
+    ];
+}
+
+
+// ── вспомогательное ─────────────────────────────────────────────────────────
+
+/**
+ * Заказ, доведённый до конечного состояния.
+ *
+ * Позиции без остатка добирают бюджет попыток прямыми вызовами: в очереди
+ * они ждали бы нарастающей отсрочки.
+ *
+ * @param list<string> $skus
+ */
+function settledOrder(Container $c, string $base, array $skus): string
+{
+    $db = $c->get(Connection::class);
+    $orderId = createOrder($base, $skus);
+
+    $total = 0;
+    foreach ($skus as $sku) {
+        $total += price($db, $sku);
+    }
+
+    pay($base, $orderId, $total);
+    drainQueue($c);
+
+    $deliver = $c->get(DeliverOrderItem::class);
+
+    // Позиция может быть занята фоновым исполнителем: тогда вызов вернёт
+    // noop и попытку придётся повторить. Предел свободный — сценарий
+    // проверяет итог, а не число обращений.
+    foreach (array_keys($skus) as $index) {
+        $position = $index + 1;
+
+        for ($attempt = 0; $attempt < 20; $attempt++) {
+            $status = $db->selectOne(
+                'SELECT status FROM order_items WHERE order_id = ? AND position = ?',
+                [$orderId, $position]
+            )['status'] ?? '';
+
+            if (in_array($status, ['delivered', 'refunded'], true)) {
+                break;
+            }
+
+            if ($deliver($orderId, $position) === 'noop') {
+                usleep(100_000);
+            }
+        }
+    }
+
+    return $orderId;
+}
+
+/** @return array<string, mixed> */
+function inspect(Connection $db, Container $c, string $orderId): array
+{
+    $order = $db->selectOne('SELECT status, price_minor FROM orders WHERE id = ?', [$orderId]);
+
+    $positions = [];
+    foreach ($db->select(
+        'SELECT position, status, price_minor FROM order_items WHERE order_id = ? ORDER BY position',
+        [$orderId]
+    ) as $row) {
+        $positions[(int) $row['position']] = (string) $row['status'];
+    }
+
+    $balances = $c->get(Ledger::class)->balancesFor($orderId);
+
+    $paid      = $balances[Ledger::SETTLEMENT] ?? 0;
+    $delivered = -($balances[Ledger::REVENUE] ?? 0);
+    $refunded  = -($balances[Ledger::REFUND] ?? 0);
+    $open      = -($balances[Ledger::OBLIGATION] ?? 0);
+
+    return [
+        'статус'        => (string) ($order['status'] ?? '?'),
+        'сумма'         => (int) ($order['price_minor'] ?? 0),
+        'цена_позиции'  => price($db, SOLD_OUT),
+        'позиции'       => $positions,
+        'кодов'         => count($db->select(
+            "SELECT 1 FROM deliveries WHERE order_id = ? AND status = 'delivered'",
+            [$orderId]
+        )),
+        'деньги' => [
+            'оплачено'   => $paid,
+            'выдано'     => $delivered,
+            'возвращено' => $refunded,
+            'в_работе'   => $open,
+            'сходится'   => $paid === $delivered + $refunded + $open,
+        ],
+    ];
+}
+
+/** @param list<string> $skus */
+function createOrder(string $base, array $skus): string
+{
+    $items = array_map(static fn (string $sku): array => ['sku' => $sku], $skus);
+    $body = post($base . '/api/orders', ['items' => $items]);
+
+    if (!isset($body['order_id'])) {
+        fwrite(STDERR, "Не удалось создать заказ: " . json_encode($body, JSON_UNESCAPED_UNICODE) . "\n");
+        exit(2);
+    }
+
+    return (string) $body['order_id'];
+}
+
+function pay(string $base, string $orderId, int $totalMinor): void
+{
+    post($base . '/api/webhooks/payment', [
+        'event_id'   => 'evt_' . bin2hex(random_bytes(6)),
+        'order_id'   => $orderId,
+        'status'     => 'paid',
+        'amount'     => $totalMinor / 100,
+        'currency'   => 'RUB',
+        'created_at' => gmdate('Y-m-d\TH:i:s\Z'),
+    ]);
+}
+
+/**
+ * Оплата без выхода в очередь.
+ *
+ * Событие записывается и применяется в той же транзакции, что и удаление
+ * созданных задач: фоновый исполнитель не видит незафиксированных строк,
+ * поэтому не перехватит работу, которую сценарий обрывает намеренно.
+ */
+function payWithoutQueue(Container $c, Connection $db, string $orderId, int $totalMinor): void
+{
+    $db->transaction(function (Connection $db) use ($c, $orderId, $totalMinor): void {
+        $db->execute(
+            'INSERT INTO payment_events (event_id, order_id, status, amount_minor, currency, occurred_at)
+                  VALUES (?, ?, ?, ?, ?, now())',
+            ['evt_' . bin2hex(random_bytes(6)), $orderId, 'paid', $totalMinor, 'RUB']
+        );
+
+        ($c->get(App\Services\ApplyPaymentEvents::class))($orderId);
+
+        $db->execute("DELETE FROM jobs WHERE payload->>'order_id' = ?", [$orderId]);
+    });
+}
+
+function price(Connection $db, string $sku): int
+{
+    return (int) $db->selectOne('SELECT price_minor FROM products WHERE sku = ?', [$sku])['price_minor'];
+}
+
+/**
+ * Товар с запасом и товар, которого нет ни у одного поставщика.
+ *
+ * Пустой остаток задаётся отсутствием строк на складе, а не режимом
+ * заглушки: так сценарий не зависит от настроек поставщика и остаётся
+ * воспроизводимым.
+ */
+function prepareCatalog(Connection $db): void
+{
+    foreach ([[IN_STOCK, 199000], [SOLD_OUT, 50000]] as [$sku, $priceMinor]) {
+        $db->execute(
+            'INSERT INTO products (sku, name, type, price_minor, currency)
+                  VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT (sku) DO UPDATE SET is_active = true, price_minor = excluded.price_minor',
+            [$sku, $sku, 'key', $priceMinor, 'RUB']
+        );
+    }
+
+    foreach (['a', 'b'] as $provider) {
+        $db->execute(
+            "INSERT INTO provider_settings (provider, mode) VALUES (?, 'ok')
+             ON CONFLICT (provider) DO UPDATE SET mode = 'ok', hang_seconds = 0",
+            [$provider]
+        );
+    }
+}
+
+/**
+ * Держит запас кодов перед каждым прогоном.
+ *
+ * Прогон расходует коды, поэтому разовой загрузки при старте не хватает:
+ * на пятом повторе склад пустел и сценарий проверял не то, что задумано.
+ */
+function topUpStock(Connection $db): void
+{
+    // Товара без остатка не должно быть ни у кого: на этом строится сценарий.
+    $db->execute('DELETE FROM provider_stock WHERE sku = ? AND request_id IS NULL', [SOLD_OUT]);
+
+    $available = count($db->select(
+        'SELECT 1 FROM provider_stock WHERE sku = ? AND request_id IS NULL',
+        [IN_STOCK]
+    ));
+
+    for ($i = $available; $i < 20; $i++) {
+        $db->execute(
+            'INSERT INTO provider_stock (provider, sku, code) VALUES (?, ?, ?)
+             ON CONFLICT DO NOTHING',
+            ['a', IN_STOCK, 'PART-' . bin2hex(random_bytes(5))]
+        );
+    }
+}
+
+/** @param array<string, mixed> $payload @return array<string, mixed> */
+function post(string $url, array $payload): array
+{
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_POST           => true,
+        CURLOPT_POSTFIELDS     => json_encode($payload, JSON_UNESCAPED_UNICODE),
+        CURLOPT_HTTPHEADER     => ['Content-Type: application/json'],
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT        => 30,
+    ]);
+    $body = json_decode((string) curl_exec($ch), true);
+    curl_close($ch);
+
+    return is_array($body) ? $body : [];
+}
+
+function drainQueue(Container $c): void
+{
+    $worker = $c->get(App\Queue\Worker::class);
+
+    for ($i = 0; $i < 200 && $worker->tick(); $i++) {
+        // задачи обрабатываются по одной
+    }
+}

@@ -36,7 +36,8 @@ abstract class TestCase extends BaseTestCase
 
         $this->db->raw(
             'TRUNCATE ledger_entries, delivery_attempts, deliveries, jobs,
-                      payment_events, orders, provider_stock, provider_settings, products
+                      payment_events, order_items, orders, provider_stock,
+                      provider_settings, products
              RESTART IDENTITY CASCADE'
         );
 
@@ -46,23 +47,36 @@ abstract class TestCase extends BaseTestCase
     /** Один товар за 1990 и по несколько кодов на складе каждого поставщика. */
     protected function seedCatalog(int $codes = 3): void
     {
+        foreach (['a', 'b'] as $provider) {
+            $this->db->execute(
+                'INSERT INTO provider_settings (provider, mode) VALUES (?, ?)',
+                [$provider, 'ok']
+            );
+        }
+
+        $this->seedProduct('KEY-GTA5', 199000, $codes);
+    }
+
+    /**
+     * Товар с заданным остатком у обоих поставщиков.
+     *
+     * Нулевой остаток нужен для сценариев, где часть позиций заказа
+     * заведомо не может быть выдана.
+     */
+    protected function seedProduct(string $sku, int $priceMinor, int $codes): void
+    {
         $this->db->execute(
             'INSERT INTO products (sku, name, type, price_minor, currency) VALUES (?, ?, ?, ?, ?)',
-            ['KEY-GTA5', 'GTA V ключ активации', 'key', 199000, 'RUB']
+            [$sku, $sku, 'key', $priceMinor, 'RUB']
         );
 
         foreach (['a', 'b'] as $provider) {
             for ($i = 1; $i <= $codes; $i++) {
                 $this->db->execute(
                     'INSERT INTO provider_stock (provider, sku, code) VALUES (?, ?, ?)',
-                    [$provider, 'KEY-GTA5', sprintf('%s-TEST-%04d', $provider, $i)]
+                    [$provider, $sku, sprintf('%s-%s-%04d', $provider, $sku, $i)]
                 );
             }
-
-            $this->db->execute(
-                'INSERT INTO provider_settings (provider, mode) VALUES (?, ?)',
-                [$provider, 'ok']
-            );
         }
     }
 
@@ -76,6 +90,34 @@ abstract class TestCase extends BaseTestCase
     protected function createOrder(string $sku = 'KEY-GTA5'): array
     {
         return (array) $this->request('POST', '/api/orders', ['sku' => $sku])->body;
+    }
+
+    /**
+     * Заказ из нескольких позиций.
+     *
+     * @param list<string> $skus
+     * @return array<string, mixed>
+     */
+    protected function createOrderWith(array $skus): array
+    {
+        $items = array_map(static fn (string $sku): array => ['sku' => $sku], $skus);
+
+        return (array) $this->request('POST', '/api/orders', ['items' => $items])->body;
+    }
+
+    /** @return array<int, string> состояния позиций по номерам */
+    protected function itemStatuses(string $orderId): array
+    {
+        $statuses = [];
+
+        foreach ($this->db->select(
+            'SELECT position, status FROM order_items WHERE order_id = ? ORDER BY position',
+            [$orderId]
+        ) as $row) {
+            $statuses[(int) $row['position']] = (string) $row['status'];
+        }
+
+        return $statuses;
     }
 
     /**
@@ -99,7 +141,7 @@ abstract class TestCase extends BaseTestCase
     }
 
     /** Обрабатывает очередь до опустошения. */
-    protected function runWorker(int $limit = 10): void
+    protected function runWorker(int $limit = 50): void
     {
         $worker = $this->container->get(Worker::class);
 

@@ -5,8 +5,8 @@ declare(strict_types=1);
 namespace App\Models;
 
 /**
- * Выдача товара по заказу. Одна на заказ — за это отвечает первичный ключ
- * deliveries.order_id.
+ * Выдача товара по одной позиции заказа. Одна на позицию — за это отвечает
+ * первичный ключ deliveries (order_id, position).
  */
 final class Delivery
 {
@@ -25,6 +25,7 @@ final class Delivery
 
     private function __construct(
         public readonly string $orderId,
+        public readonly int $position,
         public readonly string $status,
         public readonly ?string $provider,
         public readonly ?string $requestId,
@@ -41,6 +42,7 @@ final class Delivery
     {
         return new self(
             (string) $row['order_id'],
+            (int) $row['position'],
             (string) $row['status'],
             isset($row['provider']) ? (string) $row['provider'] : null,
             isset($row['request_id']) ? (string) $row['request_id'] : null,

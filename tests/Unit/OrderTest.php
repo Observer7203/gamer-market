@@ -15,7 +15,6 @@ final class OrderTest extends TestCase
     {
         return Order::fromRow($override + [
             'id'           => 'ord_TEST',
-            'sku'          => 'KEY-GTA5',
             'price_minor'  => 199000,
             'currency'     => 'RUB',
             'status'       => Order::CREATED,
@@ -39,10 +38,8 @@ final class OrderTest extends TestCase
             [Order::CREATED, Order::PAYMENT_FAILED],
             [Order::PAID, Order::DELIVERING],
             [Order::DELIVERING, Order::DELIVERED],
-            [Order::DELIVERING, Order::OUT_OF_STOCK],
-            [Order::DELIVERING, Order::DELIVERY_FAILED],
-            [Order::OUT_OF_STOCK, Order::DELIVERING],
-            [Order::DELIVERY_FAILED, Order::DELIVERING],
+            [Order::DELIVERING, Order::PARTIALLY_DELIVERED],
+            [Order::DELIVERING, Order::REFUNDED],
         ];
     }
 
@@ -62,6 +59,8 @@ final class OrderTest extends TestCase
             // Из финальных состояний выхода нет
             [Order::DELIVERED, Order::PAID],
             [Order::DELIVERED, Order::DELIVERING],
+            [Order::PARTIALLY_DELIVERED, Order::DELIVERING],
+            [Order::REFUNDED, Order::DELIVERING],
             [Order::PAYMENT_FAILED, Order::PAID],
             // Назад по основному пути
             [Order::PAID, Order::CREATED],
@@ -72,11 +71,31 @@ final class OrderTest extends TestCase
     public function testФинальныеСостояния(): void
     {
         self::assertTrue($this->order(['status' => Order::DELIVERED])->isFinal());
+        self::assertTrue($this->order(['status' => Order::PARTIALLY_DELIVERED])->isFinal());
+        self::assertTrue($this->order(['status' => Order::REFUNDED])->isFinal());
         self::assertTrue($this->order(['status' => Order::PAYMENT_FAILED])->isFinal());
 
-        // Восстановимые финальными не являются
-        self::assertFalse($this->order(['status' => Order::OUT_OF_STOCK])->isFinal());
-        self::assertFalse($this->order(['status' => Order::DELIVERY_FAILED])->isFinal());
+        self::assertFalse($this->order(['status' => Order::PAID])->isFinal());
+        self::assertFalse($this->order(['status' => Order::DELIVERING])->isFinal());
+    }
+
+    #[DataProvider('outcomes')]
+    public function testИсходЗаказаПоПозициям(int $delivered, int $total, string $expected): void
+    {
+        self::assertSame($expected, Order::outcomeFor($delivered, $total));
+    }
+
+    /** @return list<array{int, int, string}> */
+    public static function outcomes(): array
+    {
+        return [
+            [3, 3, Order::DELIVERED],
+            [1, 1, Order::DELIVERED],
+            [2, 3, Order::PARTIALLY_DELIVERED],
+            [1, 3, Order::PARTIALLY_DELIVERED],
+            [0, 3, Order::REFUNDED],
+            [0, 1, Order::REFUNDED],
+        ];
     }
 
     public function testСверкаСуммыИВалюты(): void

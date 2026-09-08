@@ -25,8 +25,11 @@ if (array_sum($healed) === 0 && !in_array('--verbose', $argv, true)) {
 }
 
 printf(
-    "возвращено задач: %d, применено событий: %d, отправлено в очередь заказов: %d\n",
+    "возвращено задач: %d, освобождено позиций: %d, применено событий: %d, "
+    . "отправлено в очередь позиций: %d, доведено заказов: %d\n",
     $healed['released_jobs'],
+    $healed['released_items'],
     $healed['applied_events'],
-    $healed['requeued_orders'],
+    $healed['requeued_items'],
+    $healed['finalized_orders'],
 );

@@ -41,14 +41,16 @@ curl http://localhost:8080/health
 docker compose exec app vendor/bin/phpunit
 ```
 
-97 тестов на отдельной базе `gamer_market_test`. Данные разработки
+135 тестов на отдельной базе `gamer_market_test`. Данные разработки
 не затрагиваются.
 
-Проверка exactly-once под конкуренцией и устойчивости интеграций:
+Проверка exactly-once под конкуренцией, устойчивости интеграций
+и частичной выдачи:
 
 ```bash
 docker compose exec app php bin/race --parallel=50 --repeat=20
 docker compose exec app php bin/failover --repeat=3
+docker compose exec app php bin/partial --repeat=3
 ```
 
 Сверка:
@@ -72,6 +74,11 @@ docker compose exec app php bin/explain
 curl -X POST http://localhost:8080/api/orders \
      -H 'Content-Type: application/json' -d '{"sku":"KEY-GTA5"}'
 
+# заказ из нескольких позиций
+curl -X POST http://localhost:8080/api/orders \
+     -H 'Content-Type: application/json' \
+     -d '{"items":[{"sku":"KEY-GTA5"},{"sku":"KEY-CS2","quantity":2}]}'
+
 # отправить вебхук оплаты
 docker compose exec app php bin/pay --order=ord_... --amount=1990 \
      --url=http://nginx/api/webhooks/payment
@@ -88,7 +95,7 @@ curl http://localhost:8080/api/orders/ord_...
 
 ```
 bin/            точки входа CLI: migrate, seed, worker, heal, reconcile,
-                explain, pay, race, failover
+                explain, pay, race, failover, partial
 config/         config.php (единственный читатель окружения), routes.php
 data/           каталог товаров и пул ключей
 docker/         nginx + php-fpm
@@ -97,7 +104,8 @@ migrations/     .sql, применяются по порядку имён, ка�
 public/         index.php — точка входа HTTP, спецификация и документация API
 src/
   Controllers/  тонкие: разобрать запрос, вызвать сервис, отдать HTTP
-  Models/       Order, PaymentEvent, Delivery — состояние и правила
+  Models/       Order, OrderItem, PaymentEvent, Delivery — состояние
+                и правила
   Services/     бизнес-логика: создание заказа, приём вебхука, выдача
   Database/     Connection (контракт) + PostgresConnection + Migrator
   Http/         Request, Response, Router, Dispatcher
@@ -134,6 +142,9 @@ tests/
 
 ## Документация
 
+- **[Частичная выдача заказа](docs/TASK_1.txt)** — заказ из нескольких
+  позиций: выданное остаётся, за невыданное возвращаются деньги, тождество
+  денег, повтор любого шага, доводка после обрыва
 - **[Архитектура ядра выдачи](docs/architecture.html)** — шесть диаграмм:
   компоненты, путь заказа, гонка параллельных вебхуков, обработка таймаута,
   машина состояний, схема данных

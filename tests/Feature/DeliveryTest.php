@@ -6,6 +6,8 @@ namespace Tests\Feature;
 
 use App\Models\Delivery;
 use App\Models\Order;
+use App\Models\OrderItem;
+use App\Services\DeliverOrderItem;
 use Tests\TestCase;
 
 final class DeliveryTest extends TestCase
@@ -20,8 +22,8 @@ final class DeliveryTest extends TestCase
         $response = $this->request('GET', '/api/orders/' . $order['order_id']);
 
         self::assertSame(Order::DELIVERED, $response->body['status']);
-        self::assertMatchesRegularExpression('/^[ab]-TEST-\d{4}$/', $response->body['delivery']['code']);
-        self::assertNotEmpty($response->body['delivery']['delivered_at']);
+        self::assertMatchesRegularExpression('/^[ab]-KEY-GTA5-\d{4}$/', $response->body['items'][0]['code']);
+        self::assertNotEmpty($response->body['items'][0]['delivered_at']);
     }
 
     public function testНаЗаказПриходитсяРовноОднаВыдача(): void
@@ -30,8 +32,8 @@ final class DeliveryTest extends TestCase
         $this->request('POST', '/api/webhooks/payment', $this->paymentEvent($order['order_id']));
         $this->runWorker();
 
-        // Повторный запуск выдачи по уже выданному заказу
-        $outcome = ($this->container->get(\App\Services\DeliverOrder::class))($order['order_id']);
+        // Повторный запуск выдачи по уже выданной позиции
+        $outcome = ($this->container->get(DeliverOrderItem::class))($order['order_id'], 1);
 
         self::assertSame('noop', $outcome);
         self::assertSame(1, $this->rows('deliveries'));
@@ -47,7 +49,7 @@ final class DeliveryTest extends TestCase
             $this->request('POST', '/api/webhooks/payment', $this->paymentEvent($order['order_id']));
             $this->runWorker();
 
-            $codes[] = $this->request('GET', '/api/orders/' . $order['order_id'])->body['delivery']['code'];
+            $codes[] = $this->request('GET', '/api/orders/' . $order['order_id'])->body['items'][0]['code'];
         }
 
         self::assertCount(3, array_unique($codes), 'каждому заказу достался свой код');
@@ -70,7 +72,9 @@ final class DeliveryTest extends TestCase
         $this->request('POST', '/api/webhooks/payment', $this->paymentEvent($order['order_id']));
         $this->runWorker();
 
-        self::assertSame(Order::OUT_OF_STOCK, $this->orderStatus($order['order_id']));
+        self::assertSame([1 => OrderItem::OUT_OF_STOCK], $this->itemStatuses($order['order_id']));
+        self::assertSame(Order::DELIVERING, $this->orderStatus($order['order_id']),
+            'заказ не завершён: позиция ещё может быть выдана');
 
         // Приложение остаётся работоспособным
         self::assertSame(200, $this->request('GET', '/health')->status);
@@ -83,14 +87,14 @@ final class DeliveryTest extends TestCase
         // После пополнения склада повтор доводит заказ до выдачи
         $this->db->execute(
             'INSERT INTO provider_stock (provider, sku, code) VALUES (?, ?, ?)',
-            ['a', 'KEY-GTA5', 'a-TEST-9999']
+            ['a', 'KEY-GTA5', 'a-KEY-GTA5-9999']
         );
         $this->db->execute('UPDATE jobs SET run_at = now() WHERE id = ?', [$job['id']]);
         $this->runWorker();
 
         self::assertSame(Order::DELIVERED, $this->orderStatus($order['order_id']));
-        self::assertSame('a-TEST-9999', $this->request('GET', '/api/orders/' . $order['order_id'])
-            ->body['delivery']['code']);
+        self::assertSame('a-KEY-GTA5-9999', $this->request('GET', '/api/orders/' . $order['order_id'])
+            ->body['items'][0]['code']);
     }
 
     public function testПовторКПоставщикуВозвращаетТотЖеКод(): void
@@ -132,12 +136,16 @@ final class DeliveryTest extends TestCase
         $this->request('POST', '/api/webhooks/payment', $this->paymentEvent($order['order_id']));
         $this->runWorker();
 
-        $row = $this->db->selectOne('SELECT * FROM deliveries WHERE order_id = ?', [$order['order_id']]);
+        $row = $this->db->selectOne(
+            'SELECT * FROM deliveries WHERE order_id = ? AND position = 1',
+            [$order['order_id']]
+        );
         $delivery = Delivery::fromRow($row);
 
         self::assertTrue($delivery->isDelivered());
         self::assertSame('a', $delivery->provider);
-        self::assertSame('req_' . $order['order_id'] . '_a', $delivery->requestId);
+        self::assertSame('req_' . $order['order_id'] . '_1_a', $delivery->requestId);
         self::assertSame(1, $delivery->attempts);
+        self::assertSame([1 => OrderItem::DELIVERED], $this->itemStatuses($order['order_id']));
     }
 }

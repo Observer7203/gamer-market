@@ -4,7 +4,7 @@
 declare(strict_types=1);
 
 use App\Database\Connection;
-use App\Services\DeliverOrder;
+use App\Services\DeliverOrderItem;
 use App\Support\Container;
 
 /**
@@ -171,7 +171,7 @@ function raceWorkers(Container $container, string $base, string $orderId, int $p
             // Дочернему процессу нужно собственное подключение: сокет
             // родителя унаследован и одновременное использование его портит.
             $child = require dirname(__DIR__) . '/src/bootstrap.php';
-            $outcome = ($child->get(DeliverOrder::class))($orderId);
+            $outcome = ($child->get(DeliverOrderItem::class))($orderId, 1);
             fwrite($pair[1], $outcome);
             fclose($pair[1]);
 

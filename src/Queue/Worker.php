@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace App\Queue;
 
 use App\Database\Connection;
-use App\Services\DeliverOrder;
+use App\Services\DeliverOrderItem;
 use App\Support\Logger;
 use Throwable;
 
@@ -30,7 +30,7 @@ final class Worker
 
     public function __construct(
         private readonly Queue $queue,
-        private readonly DeliverOrder $deliverOrder,
+        private readonly DeliverOrderItem $deliverOrderItem,
         private readonly Connection $db,
         private readonly Logger $logger,
     ) {
@@ -94,11 +94,16 @@ final class Worker
 
         try {
             $outcome = match ($job['type']) {
-                'deliver_order' => ($this->deliverOrder)((string) $payload['order_id']),
-                default         => throw new \RuntimeException("Неизвестный тип задачи [{$job['type']}]"),
+                'deliver_item' => ($this->deliverOrderItem)(
+                    (string) $payload['order_id'],
+                    (int) $payload['position'],
+                ),
+                default => throw new \RuntimeException("Неизвестный тип задачи [{$job['type']}]"),
             };
 
-            if ($outcome === 'delivered' || $outcome === 'noop') {
+            // Возврат денег — такой же законный исход позиции, как выдача:
+            // повторять задачу больше незачем.
+            if (in_array($outcome, ['delivered', 'refunded', 'noop'], true)) {
                 $this->queue->done($id);
             } else {
                 $this->reschedule($job, $outcome);

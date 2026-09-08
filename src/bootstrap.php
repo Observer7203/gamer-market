@@ -5,7 +5,9 @@ declare(strict_types=1);
 use App\Database\Connection;
 use App\Database\Migrator;
 use App\Database\PostgresConnection;
-use App\Services\DeliverOrder;
+use App\Services\DeliverOrderItem;
+use App\Services\FinalizeOrder;
+use App\Services\RefundItem;
 use App\Services\HttpProviderClient;
 use App\Services\Ledger;
 use App\Services\ProviderClient;
@@ -43,14 +45,17 @@ return (static function (): Container {
         $c->get(Logger::class),
     ));
 
-    $container->singleton(DeliverOrder::class, fn (Container $c): DeliverOrder => new DeliverOrder(
+    $container->singleton(DeliverOrderItem::class, fn (Container $c): DeliverOrderItem => new DeliverOrderItem(
         $c->get(Connection::class),
         $c->get(ProviderClient::class),
         $c->get(Ledger::class),
+        $c->get(RefundItem::class),
+        $c->get(FinalizeOrder::class),
         $c->get(Logger::class),
         array_keys($config['provider']['endpoints']),
         $config['provider']['max_attempts'],
         $config['provider']['backoff_ms'],
+        $config['delivery']['give_up_after'],
     ));
 
     $container->singleton(Migrator::class, fn (Container $c): Migrator => new Migrator(

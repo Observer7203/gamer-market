@@ -14,13 +14,17 @@ use App\Database\Connection;
  * неисполненное обязательство перед покупателем, второй — отданный
  * без оплаты товар.
  *
+ * Третий вопрос — сходятся ли деньги. Тождество проверяется по журналу:
+ *
+ *     оплачено = выдано + возвращено + ещё в работе
+ *
  * Остальные разделы показывают состояния, из которых система не вышла
  * самостоятельно: зависшие задачи, неразрешённые обращения к поставщику,
  * непринятые платёжные события.
  */
 final class Reconciliation
 {
-    /** Заказ считается зависшим, если не завершился за это время. */
+    /** Позиция считается зависшей, если не завершилась за это время. */
     private const STUCK_AFTER_SECONDS = 300;
 
     public function __construct(
@@ -38,10 +42,13 @@ final class Reconciliation
         $unresolved       = $this->unresolvedDeliveries();
         $unappliedEvents  = $this->unappliedEvents();
         $imbalanced       = $this->ledger->imbalanced();
+        $unsettled        = $this->ledger->unsettledOrders();
+        $money            = $this->money();
 
         $problems = count($paidNotDelivered) + count($deliveredNotPaid)
             + count($stuckJobs) + count($unresolved)
-            + count($unappliedEvents) + count($imbalanced);
+            + count($unappliedEvents) + count($imbalanced) + count($unsettled)
+            + ($money['balanced'] ? 0 : 1);
 
         return [
             'generated_at' => gmdate('c'),
@@ -49,52 +56,85 @@ final class Reconciliation
             'problems'     => $problems,
 
             'summary' => [
-                'orders'            => $this->count('orders'),
-                'delivered'         => $this->count('orders', "status = 'delivered'"),
-                'paid_not_delivered' => count($paidNotDelivered),
-                'delivered_not_paid' => count($deliveredNotPaid),
-                'stuck_jobs'        => count($stuckJobs),
+                'orders'                => $this->count('orders'),
+                'items'                 => $this->count('order_items'),
+                'delivered_items'       => $this->count('order_items', "status = 'delivered'"),
+                'refunded_items'        => $this->count('order_items', "status = 'refunded'"),
+                'partially_delivered'   => $this->count('orders', "status = 'partially_delivered'"),
+                'paid_not_delivered'    => count($paidNotDelivered),
+                'delivered_not_paid'    => count($deliveredNotPaid),
+                'stuck_jobs'            => count($stuckJobs),
                 'unresolved_deliveries' => count($unresolved),
-                'unapplied_events'  => count($unappliedEvents),
-                'ledger_imbalanced' => count($imbalanced),
+                'unapplied_events'      => count($unappliedEvents),
+                'ledger_imbalanced'     => count($imbalanced),
+                'unsettled_orders'      => count($unsettled),
             ],
 
-            'ledger' => [
-                'balances' => $this->ledger->balances(),
-                'note'     => 'obligation — оплачено, но не выдано; сумма всех счетов равна нулю',
-            ],
+            'money'  => $money,
+            'ledger' => ['balances' => $this->ledger->balances()],
 
-            'paid_not_delivered'     => $paidNotDelivered,
-            'delivered_not_paid'     => $deliveredNotPaid,
-            'stuck_jobs'             => $stuckJobs,
-            'unresolved_deliveries'  => $unresolved,
-            'unapplied_events'       => $unappliedEvents,
-            'ledger_imbalanced'      => $imbalanced,
+            'paid_not_delivered'    => $paidNotDelivered,
+            'delivered_not_paid'    => $deliveredNotPaid,
+            'stuck_jobs'            => $stuckJobs,
+            'unresolved_deliveries' => $unresolved,
+            'unapplied_events'      => $unappliedEvents,
+            'ledger_imbalanced'     => $imbalanced,
+            'unsettled_orders'      => $unsettled,
+        ];
+    }
+
+    /**
+     * Тождество денег.
+     *
+     * Каждый принятый рубль обязан находиться ровно в одном из трёх
+     * состояний: отработан выдачей, возвращён покупателю либо ещё
+     * составляет обязательство по незавершённым позициям.
+     *
+     * @return array<string, mixed>
+     */
+    private function money(): array
+    {
+        $balances = $this->ledger->balances();
+
+        $paid       = $balances[Ledger::SETTLEMENT] ?? 0;
+        $delivered  = -($balances[Ledger::REVENUE] ?? 0);
+        $refunded   = -($balances[Ledger::REFUND] ?? 0);
+        $inProgress = -($balances[Ledger::OBLIGATION] ?? 0);
+
+        return [
+            'paid_minor'        => $paid,
+            'delivered_minor'   => $delivered,
+            'refunded_minor'    => $refunded,
+            'in_progress_minor' => $inProgress,
+            'balanced'          => $paid === $delivered + $refunded + $inProgress,
+            'identity'          => 'оплачено = выдано + возвращено + в работе',
         ];
     }
 
     /**
      * Оплачен, но не выдан.
      *
-     * Деньги получены, товар не отдан. Заказы, не завершившиеся в отведённое
-     * время, требуют вмешательства или ожидают восстановления поставщика.
+     * Деньги получены, позиция не отдана и не возвращена. Позиции,
+     * не завершившиеся в отведённое время, требуют вмешательства
+     * или ожидают восстановления поставщика.
      *
      * @return list<array<string, mixed>>
      */
     private function paidNotDelivered(): array
     {
         return $this->db->select(
-            "SELECT o.id AS order_id, o.status, o.sku, o.price_minor, o.paid_at,
+            "SELECT i.order_id, i.position, i.sku, i.status, i.price_minor, o.paid_at,
                     coalesce(d.status, '—') AS delivery_status,
                     coalesce(d.last_error, '') AS last_error,
                     coalesce(d.unresolved_provider, '') AS unresolved_provider,
                     round(extract(epoch FROM now() - o.paid_at))::int AS waiting_seconds
-               FROM orders o
-               LEFT JOIN deliveries d ON d.order_id = o.id
+               FROM order_items i
+               JOIN orders o ON o.id = i.order_id
+               LEFT JOIN deliveries d ON d.order_id = i.order_id AND d.position = i.position
               WHERE o.paid_at IS NOT NULL
-                AND o.status <> 'delivered'
+                AND i.settled_at IS NULL
                 AND o.paid_at < now() - make_interval(secs => ?)
-              ORDER BY o.paid_at",
+              ORDER BY o.paid_at, i.position",
             [self::STUCK_AFTER_SECONDS]
         );
     }
@@ -110,7 +150,7 @@ final class Reconciliation
     private function deliveredNotPaid(): array
     {
         return $this->db->select(
-            "SELECT d.order_id, d.code, d.provider, d.delivered_at, o.status
+            "SELECT d.order_id, d.position, d.code, d.provider, d.delivered_at, o.status
                FROM deliveries d
                JOIN orders o ON o.id = d.order_id
               WHERE d.status = 'delivered' AND o.paid_at IS NULL
@@ -129,7 +169,8 @@ final class Reconciliation
     private function stuckJobs(): array
     {
         return $this->db->select(
-            "SELECT id, type, payload->>'order_id' AS order_id, attempts, locked_at,
+            "SELECT id, type, payload->>'order_id' AS order_id, payload->>'position' AS position,
+                    attempts, locked_at,
                     round(extract(epoch FROM now() - locked_at))::int AS locked_seconds
                FROM jobs
               WHERE status = 'running' AND locked_at < now() - make_interval(secs => ?)
@@ -141,16 +182,17 @@ final class Reconciliation
     /**
      * Выдачи, по которым поставщик не ответил.
      *
-     * Состояние поставщика неизвестно: код мог быть выдан. Переключение
-     * на резервного запрещено, требуется повторное обращение к тому же.
+     * Состояние поставщика неизвестно: код мог быть выдан. Ни переключение
+     * на резервного, ни возврат денег из этого состояния недопустимы —
+     * требуется повторное обращение к тому же поставщику.
      *
      * @return list<array<string, mixed>>
      */
     private function unresolvedDeliveries(): array
     {
         return $this->db->select(
-            "SELECT order_id, unresolved_provider, request_id, attempts, last_error
-               FROM deliveries WHERE status = 'unresolved' ORDER BY order_id"
+            "SELECT order_id, position, unresolved_provider, request_id, attempts, last_error
+               FROM deliveries WHERE status = 'unresolved' ORDER BY order_id, position"
         );
     }
 

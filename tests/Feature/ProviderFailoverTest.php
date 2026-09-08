@@ -6,6 +6,7 @@ namespace Tests\Feature;
 
 use App\Models\Delivery;
 use App\Models\Order;
+use App\Models\OrderItem;
 use App\Services\ProviderStub;
 use Tests\TestCase;
 
@@ -145,7 +146,7 @@ final class ProviderFailoverTest extends TestCase
 
         $delivery = $this->delivery($orderId);
 
-        self::assertSame(Order::DELIVERED, $this->orderStatus($orderId));
+        self::assertSame(OrderItem::DELIVERED, $this->itemStatuses($orderId)[1]);
         self::assertSame('a', $delivery['provider']);
         self::assertSame($claimed['code'], $delivery['code'], 'возвращён ранее занятый код');
         self::assertSame(1, $this->codesTaken($orderId), 'второго кода не появилось');
@@ -159,7 +160,7 @@ final class ProviderFailoverTest extends TestCase
         $order = $this->deliverPaidOrder();
         $orderId = $order['order_id'];
 
-        self::assertSame(Order::DELIVERY_FAILED, $this->orderStatus($orderId));
+        self::assertSame(OrderItem::FAILED, $this->itemStatuses($orderId)[1]);
         self::assertSame(0, $this->codesTaken($orderId));
         self::assertSame(200, $this->request('GET', '/health')->status);
 
@@ -171,7 +172,7 @@ final class ProviderFailoverTest extends TestCase
         $this->db->execute("UPDATE jobs SET run_at = now() WHERE status = 'pending'");
         $this->runWorker();
 
-        self::assertSame(Order::DELIVERED, $this->orderStatus($orderId));
+        self::assertSame(OrderItem::DELIVERED, $this->itemStatuses($orderId)[1]);
         self::assertSame(1, $this->codesTaken($orderId));
     }
 
@@ -192,6 +193,6 @@ final class ProviderFailoverTest extends TestCase
 
         // Идентификатор детерминирован: повтор обращается к тому же запросу.
         self::assertCount(1, $requestIds);
-        self::assertSame('req_' . $order['order_id'] . '_a', $requestIds[0]);
+        self::assertSame('req_' . $order['order_id'] . '_1_a', $requestIds[0]);
     }
 }

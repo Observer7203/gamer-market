@@ -5,41 +5,50 @@ declare(strict_types=1);
 namespace App\Models;
 
 /**
- * Заказ: состояние и правила его изменения.
+ * Заказ: состав, сумма и правила изменения состояния.
  *
- * Переходы заданы белым списком — разрешено только перечисленное. Проверка
- * принадлежит объекту, а не контроллеру или сервису: состоянием владеет заказ.
+ * Заказ состоит из позиций, каждая из которых выдаётся отдельно. Конечное
+ * состояние заказа выводится из состояний позиций: все выданы, часть выдана
+ * и часть возвращена, либо возвращено всё.
  */
 final class Order
 {
-    public const CREATED         = 'created';
-    public const PAID            = 'paid';
-    public const DELIVERING      = 'delivering';
-    public const DELIVERED       = 'delivered';
-    public const PAYMENT_FAILED  = 'payment_failed';
-    public const OUT_OF_STOCK    = 'out_of_stock';
-    public const DELIVERY_FAILED = 'delivery_failed';
+    public const CREATED    = 'created';
+    public const PAID       = 'paid';
+    public const DELIVERING = 'delivering';
+
+    /** Все позиции выданы. */
+    public const DELIVERED = 'delivered';
+
+    /** Часть позиций выдана, за остальные возвращены деньги. */
+    public const PARTIALLY_DELIVERED = 'partially_delivered';
+
+    /** Ни одна позиция не выдана, деньги возвращены полностью. */
+    public const REFUNDED = 'refunded';
+
+    public const PAYMENT_FAILED = 'payment_failed';
 
     /** @var array<string, list<string>> */
     private const TRANSITIONS = [
-        self::CREATED         => [self::PAID, self::PAYMENT_FAILED],
-        self::PAID            => [self::DELIVERING],
-        self::DELIVERING      => [self::DELIVERED, self::OUT_OF_STOCK, self::DELIVERY_FAILED],
+        self::CREATED    => [self::PAID, self::PAYMENT_FAILED],
+        self::PAID       => [self::DELIVERING],
+        self::DELIVERING => [self::DELIVERED, self::PARTIALLY_DELIVERED, self::REFUNDED],
 
-        self::DELIVERED       => [],
-        self::PAYMENT_FAILED  => [],
-
-        // Восстановимые: повторная выдача идёт с тем же request_id,
-        // поэтому возврат в delivering не создаёт вторую выдачу.
-        self::OUT_OF_STOCK    => [self::DELIVERING],
-        self::DELIVERY_FAILED => [self::DELIVERING],
+        self::DELIVERED           => [],
+        self::PARTIALLY_DELIVERED => [],
+        self::REFUNDED            => [],
+        self::PAYMENT_FAILED      => [],
     ];
 
-    private const FINAL = [self::DELIVERED, self::PAYMENT_FAILED];
+    private const FINAL = [
+        self::DELIVERED,
+        self::PARTIALLY_DELIVERED,
+        self::REFUNDED,
+        self::PAYMENT_FAILED,
+    ];
 
     private function __construct(
         public readonly string $id,
-        public readonly string $sku,
         public readonly int $priceMinor,
         public readonly string $currency,
         public readonly string $status,
@@ -54,7 +63,6 @@ final class Order
     {
         return new self(
             (string) $row['id'],
-            (string) $row['sku'],
             (int) $row['price_minor'],
             (string) $row['currency'],
             (string) $row['status'],
@@ -74,9 +82,29 @@ final class Order
         return in_array($this->status, self::FINAL, true);
     }
 
+    public function isPaid(): bool
+    {
+        return $this->paidAt !== null;
+    }
+
     public function matches(int $amountMinor, string $currency): bool
     {
         return $this->priceMinor === $amountMinor && $this->currency === $currency;
+    }
+
+    /**
+     * Конечное состояние заказа по итогам позиций.
+     *
+     * @param int $delivered число выданных позиций
+     * @param int $total     всего позиций
+     */
+    public static function outcomeFor(int $delivered, int $total): string
+    {
+        return match (true) {
+            $delivered === $total => self::DELIVERED,
+            $delivered === 0      => self::REFUNDED,
+            default               => self::PARTIALLY_DELIVERED,
+        };
     }
 
     /**

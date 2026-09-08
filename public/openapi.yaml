@@ -140,18 +140,56 @@ paths:
 
         Цена копируется в заказ на момент создания, поэтому последующая
         переоценка товара не изменяет сумму уже оформленного заказа.
+
+        Заказ состоит из позиций. Каждая выдаётся отдельно и может
+        завершиться иначе, чем соседняя: одна выдана, за другую возвращены
+        деньги. Сумма заказа равна сумме позиций.
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              type: object
-              required: [sku]
-              properties:
-                sku:
-                  type: string
-                  description: Артикул товара
-                  example: KEY-GTA5
+              oneOf:
+                - type: object
+                  title: Несколько позиций
+                  required: [items]
+                  properties:
+                    items:
+                      type: array
+                      minItems: 1
+                      maxItems: 50
+                      items:
+                        type: object
+                        required: [sku]
+                        properties:
+                          sku:
+                            type: string
+                            example: KEY-GTA5
+                          quantity:
+                            type: integer
+                            minimum: 1
+                            default: 1
+                            description: |
+                              Разворачивается в отдельные позиции: у каждой
+                              единицы свой код и свой исход.
+                - type: object
+                  title: Одна позиция
+                  required: [sku]
+                  properties:
+                    sku:
+                      type: string
+                      description: Артикул товара
+                      example: KEY-GTA5
+            examples:
+              одна позиция:
+                value:
+                  sku: KEY-GTA5
+              несколько позиций:
+                value:
+                  items:
+                    - sku: KEY-GTA5
+                    - sku: KEY-CS2
+                      quantity: 2
       responses:
         "201":
           description: Заказ создан
@@ -178,8 +216,8 @@ paths:
       tags: [Заказы]
       summary: Состояние заказа
       description: |
-        Блок `delivery` появляется только после успешной выдачи. До этого
-        момента его в ответе нет.
+        Поле `code` у позиции появляется только после успешной выдачи.
+        До этого момента его в ответе нет.
       parameters:
         - name: id
           in: path
@@ -198,22 +236,51 @@ paths:
                 ожидает оплаты:
                   value:
                     order_id: ord_01M1V74GDR7FW5KKQYYK30X2RC
-                    sku: KEY-GTA5
                     amount: 1990
+                    refunded: 0
                     currency: RUB
                     status: created
                     created_at: "2026-09-06 10:16:18.378953+00"
+                    items:
+                      - position: 1
+                        sku: KEY-GTA5
+                        amount: 1990
+                        status: pending
                 выдан:
                   value:
                     order_id: ord_01M1V74GDR7FW5KKQYYK30X2RC
-                    sku: KEY-GTA5
                     amount: 1990
+                    refunded: 0
                     currency: RUB
                     status: delivered
                     created_at: "2026-09-06 10:16:18.378953+00"
-                    delivery:
-                      code: a-HHW6-4RX2-DX62
-                      delivered_at: "2026-09-06 10:18:09.233881+00"
+                    items:
+                      - position: 1
+                        sku: KEY-GTA5
+                        amount: 1990
+                        status: delivered
+                        code: a-HHW6-4RX2-DX62
+                        delivered_at: "2026-09-06 10:18:09.233881+00"
+                выдан частично:
+                  value:
+                    order_id: ord_01M1V74GDR7FW5KKQYYK30X2RC
+                    amount: 2490
+                    refunded: 500
+                    currency: RUB
+                    status: partially_delivered
+                    created_at: "2026-09-06 10:16:18.378953+00"
+                    items:
+                      - position: 1
+                        sku: KEY-GTA5
+                        amount: 1990
+                        status: delivered
+                        code: a-HHW6-4RX2-DX62
+                        delivered_at: "2026-09-06 10:18:09.233881+00"
+                      - position: 2
+                        sku: KEY-CS2
+                        amount: 500
+                        status: refunded
+                        refunded_at: "2026-09-06 10:19:41.115302+00"
         "404":
           description: Заказ не найден
           content:
@@ -484,44 +551,78 @@ components:
 
     Order:
       type: object
-      required: [order_id, sku, amount, currency, status, created_at]
+      required: [order_id, amount, refunded, currency, status, created_at, items]
       properties:
         order_id:
           type: string
           description: Идентификатор вида `ord_<ULID>`, сортируемый по времени
           example: ord_01M1V74GDR7FW5KKQYYK30X2RC
-        sku:
-          type: string
-          example: KEY-GTA5
         amount:
           type: integer
-          description: Сумма в целых единицах валюты
+          description: Сумма заказа в целых единицах валюты, равна сумме позиций
           example: 1990
+        refunded:
+          type: integer
+          description: Сколько из этой суммы возвращено покупателю
+          example: 0
         currency:
           type: string
           example: RUB
         status:
           type: string
-          enum: [created, paid, delivering, delivered, payment_failed, out_of_stock, delivery_failed]
+          enum: [created, paid, delivering, delivered, partially_delivered, refunded, payment_failed]
           description: |
-            Основной путь: `created` → `paid` → `delivering` → `delivered`.
+            Основной путь: `created` → `paid` → `delivering` → исход.
 
-            Финальные состояния: `delivered`, `payment_failed`.
+            Исход выводится из состояний позиций: все выданы — `delivered`,
+            часть выдана и за часть возвращены деньги —
+            `partially_delivered`, не выдана ни одна — `refunded`.
 
-            Восстановимые: `out_of_stock`, `delivery_failed` — фоновая задача
-            доводит их до выдачи после пополнения остатка либо восстановления
-            поставщика.
+            Все четыре исхода конечны, как и `payment_failed`.
         created_at:
           type: string
-        delivery:
-          type: object
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/OrderItem"
+
+    OrderItem:
+      type: object
+      required: [position, sku, amount, status]
+      properties:
+        position:
+          type: integer
+          description: Номер позиции в заказе, назначается при создании и не меняется
+          example: 1
+        sku:
+          type: string
+          example: KEY-GTA5
+        amount:
+          type: integer
+          example: 1990
+        status:
+          type: string
+          enum: [pending, delivering, delivered, out_of_stock, failed, unresolved, refunded]
+          description: |
+            Конечные состояния: `delivered` и `refunded`.
+
+            Восстановимые: `out_of_stock` и `failed` — повтор доводит позицию
+            до выдачи после пополнения остатка либо восстановления поставщика,
+            а исчерпание попыток приводит к возврату денег.
+
+            `unresolved` — поставщик не ответил. Код мог быть выдан, поэтому
+            ни переключение на резервного поставщика, ни возврат денег
+            из этого состояния не допускаются: неопределённость разрешается
+            повтором к тому же поставщику.
+        code:
+          type: string
           description: Присутствует только после успешной выдачи
-          properties:
-            code:
-              type: string
-              example: a-HHW6-4RX2-DX62
-            delivered_at:
-              type: string
+          example: a-HHW6-4RX2-DX62
+        delivered_at:
+          type: string
+        refunded_at:
+          type: string
+          description: Присутствует только после возврата денег
 
     CatalogItem:
       type: object
@@ -592,10 +693,13 @@ components:
           type: object
           properties:
             orders: {type: integer}
-            delivered: {type: integer}
+            items: {type: integer}
+            delivered_items: {type: integer}
+            refunded_items: {type: integer}
+            partially_delivered: {type: integer}
             paid_not_delivered:
               type: integer
-              description: Деньги получены, товар не отдан
+              description: Деньги получены, позиция не отдана и не возвращена
             delivered_not_paid:
               type: integer
               description: Товар отдан без подтверждённой оплаты
@@ -611,6 +715,29 @@ components:
             ledger_imbalanced:
               type: integer
               description: Проводки с суммой, отличной от нуля
+            unsettled_orders:
+              type: integer
+              description: Завершённые заказы с непогашенным обязательством
+        money:
+          type: object
+          description: |
+            Тождество денег: каждый принятый рубль находится ровно в одном
+            из трёх состояний — отработан выдачей, возвращён покупателю
+            либо составляет обязательство по незавершённым позициям.
+          properties:
+            paid_minor: {type: integer}
+            delivered_minor: {type: integer}
+            refunded_minor: {type: integer}
+            in_progress_minor: {type: integer}
+            balanced:
+              type: boolean
+              description: Выполняется ли оплачено = выдано + возвращено + в работе
+          example:
+            paid_minor: 21691000
+            delivered_minor: 21641000
+            refunded_minor: 50000
+            in_progress_minor: 0
+            balanced: true
         ledger:
           type: object
           properties:
@@ -620,11 +747,12 @@ components:
                 Баланс по счетам в минорных единицах. Сумма всех счетов
                 всегда равна нулю: журнал ведётся двойной записью.
 
-                `obligation` равен сумме оплаченных, но не выданных заказов.
+                `obligation` равен стоимости незавершённых позиций.
               example:
                 settlement: 21691000
                 obligation: 0
-                revenue: -21691000
+                revenue: -21641000
+                refund: -50000
 
     Error:
       type: object

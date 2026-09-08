@@ -28,6 +28,13 @@ return [
         'backoff_ms'   => (int) (getenv('PROVIDER_BACKOFF_MS') ?: 200),
     ],
 
+    'delivery' => [
+        // Сколько раз позиция берётся в работу, прежде чем деньги за неё
+        // возвращаются. Предел применяется только к явным отказам:
+        // из неопределённости возврат запрещён при любом числе попыток.
+        'give_up_after' => (int) (getenv('DELIVERY_GIVE_UP_AFTER') ?: 3),
+    ],
+
     'log' => [
         'path' => dirname(__DIR__) . '/storage/logs/app.log',
     ],

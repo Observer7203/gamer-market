@@ -5,7 +5,9 @@ declare(strict_types=1);
 namespace App\Services;
 
 use App\Database\Connection;
+use App\Models\Delivery;
 use App\Models\Order;
+use App\Models\OrderItem;
 use App\Queue\Queue;
 use App\Support\Logger;
 
@@ -29,6 +31,7 @@ final class HealStuckOrders
         private readonly Connection $db,
         private readonly Queue $queue,
         private readonly ApplyPaymentEvents $applyPaymentEvents,
+        private readonly FinalizeOrder $finalizeOrder,
         private readonly Logger $logger,
     ) {
     }
@@ -37,9 +40,11 @@ final class HealStuckOrders
     public function __invoke(): array
     {
         $healed = [
-            'released_jobs'    => $this->releaseAbandonedJobs(),
-            'applied_events'   => $this->applyPendingEvents(),
-            'requeued_orders'  => $this->requeueUnfinishedOrders(),
+            'released_jobs'     => $this->releaseAbandonedJobs(),
+            'released_items'    => $this->releaseAbandonedItems(),
+            'applied_events'    => $this->applyPendingEvents(),
+            'requeued_items'    => $this->requeueUnfinishedItems(),
+            'finalized_orders'  => $this->finalizeSettledOrders(),
         ];
 
         if (array_sum($healed) > 0) {
@@ -101,40 +106,102 @@ final class HealStuckOrders
     }
 
     /**
-     * Возврат в очередь оплаченных заказов без активной задачи.
+     * Освобождение позиций, брошенных посреди выдачи.
+     *
+     * Исполнитель мог быть остановлен между занятием позиции и записью
+     * результата. Позиция остаётся в состоянии выдачи, и без сброса её
+     * не возьмёт ни один исполнитель. Повторное обращение к поставщику
+     * идёт с прежним идентификатором запроса, поэтому вторая выдача
+     * исключена — сброс безопасен.
+     */
+    private function releaseAbandonedItems(): int
+    {
+        $released = $this->db->execute(
+            "UPDATE deliveries
+                SET status = ?
+              WHERE status = ? AND claimed_at < now() - make_interval(secs => ?)",
+            [Delivery::UNRESOLVED, Delivery::IN_FLIGHT, self::LEASE_SECONDS]
+        );
+
+        $this->db->execute(
+            "UPDATE order_items i
+                SET status = ?
+               FROM deliveries d
+              WHERE d.order_id = i.order_id AND d.position = i.position
+                AND i.status = ? AND d.status = ?",
+            [OrderItem::UNRESOLVED, OrderItem::DELIVERING, Delivery::UNRESOLVED]
+        );
+
+        return $released;
+    }
+
+    /**
+     * Возврат в очередь незавершённых позиций без активной задачи.
      *
      * Покрывает случай, когда задача была утрачена или исчерпала попытки,
-     * а заказ остался неисполненным. Повторное обращение к поставщику идёт
-     * с прежним идентификатором запроса, поэтому вторая выдача исключена.
+     * а позиция осталась неисполненной.
      */
-    private function requeueUnfinishedOrders(): int
+    private function requeueUnfinishedItems(): int
     {
-        $orders = $this->db->select(
-            "SELECT o.id
-               FROM orders o
-              WHERE o.status IN (?, ?, ?, ?)
+        $items = $this->db->select(
+            "SELECT i.order_id, i.position
+               FROM order_items i
+               JOIN orders o ON o.id = i.order_id
+              WHERE i.settled_at IS NULL
+                AND o.status IN (?, ?)
                 AND o.paid_at < now() - make_interval(secs => ?)
                 AND NOT EXISTS (
                     SELECT 1 FROM jobs j
                      WHERE j.status IN ('pending', 'running')
-                       AND j.payload->>'order_id' = o.id
+                       AND j.payload->>'order_id' = i.order_id
+                       AND (j.payload->>'position')::int = i.position
                 )",
-            [
-                Order::PAID, Order::DELIVERING, Order::OUT_OF_STOCK, Order::DELIVERY_FAILED,
-                self::STUCK_AFTER_SECONDS,
-            ]
+            [Order::PAID, Order::DELIVERING, self::STUCK_AFTER_SECONDS]
         );
 
-        foreach ($orders as $row) {
-            $orderId = (string) $row['id'];
-            $this->queue->push('deliver_order', ['order_id' => $orderId]);
+        foreach ($items as $row) {
+            $this->queue->push('deliver_item', [
+                'order_id' => (string) $row['order_id'],
+                'position' => (int) $row['position'],
+            ]);
 
-            $this->logger->info('heal_requeued_order', [
+            $this->logger->info('heal_requeued_item', [
                 'channel'  => 'delivery',
-                'order_id' => $orderId,
+                'order_id' => (string) $row['order_id'],
+                'position' => (int) $row['position'],
             ]);
         }
 
-        return count($orders);
+        return count($items);
+    }
+
+    /**
+     * Доведение заказов, все позиции которых завершены, до конечного статуса.
+     *
+     * Обычно это делает сама выдача, но процесс мог упасть между завершением
+     * последней позиции и пересчётом заказа.
+     */
+    private function finalizeSettledOrders(): int
+    {
+        $orders = $this->db->select(
+            "SELECT o.id
+               FROM orders o
+              WHERE o.status IN (?, ?)
+                AND NOT EXISTS (
+                    SELECT 1 FROM order_items i
+                     WHERE i.order_id = o.id AND i.settled_at IS NULL
+                )",
+            [Order::PAID, Order::DELIVERING]
+        );
+
+        $finalized = 0;
+
+        foreach ($orders as $row) {
+            if (($this->finalizeOrder)((string) $row['id']) !== null) {
+                $finalized++;
+            }
+        }
+
+        return $finalized;
     }
 }

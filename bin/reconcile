@@ -29,13 +29,17 @@ printf("Сверка на %s\n\n", $report['generated_at']);
 
 $titles = [
     'orders'                => 'заказов всего',
-    'delivered'             => 'выдано',
+    'items'                 => 'позиций всего',
+    'delivered_items'       => 'позиций выдано',
+    'refunded_items'        => 'позиций возвращено',
+    'partially_delivered'   => 'заказов выдано частично',
     'paid_not_delivered'    => 'оплачен, но не выдан',
     'delivered_not_paid'    => 'выдан, но не оплачен',
     'stuck_jobs'            => 'зависших задач',
     'unresolved_deliveries' => 'выдач без ответа поставщика',
     'unapplied_events'      => 'непринятых событий',
     'ledger_imbalanced'     => 'несведённых проводок',
+    'unsettled_orders'      => 'завершённых с долгом',
 ];
 
 $pad = static fn (string $text, int $width): string
@@ -44,6 +48,16 @@ $pad = static fn (string $text, int $width): string
 foreach ($report['summary'] as $key => $value) {
     printf("  %s %s\n", $pad($titles[$key] ?? $key, 32), $value);
 }
+
+$money = $report['money'];
+
+echo "\nДеньги, минорные единицы:\n";
+printf("  %s %d\n", $pad('оплачено', 32), $money['paid_minor']);
+printf("  %s %d\n", $pad('выдано', 32), $money['delivered_minor']);
+printf("  %s %d\n", $pad('возвращено', 32), $money['refunded_minor']);
+printf("  %s %d\n", $pad('ещё в работе', 32), $money['in_progress_minor']);
+printf("  %s %s\n", $pad('оплачено = выдано + возвращено + в работе', 42),
+    $money['balanced'] ? 'да' : 'НЕТ');
 
 echo "\nБаланс журнала, минорные единицы:\n";
 
@@ -61,6 +75,7 @@ $sections = [
     'unresolved_deliveries' => 'ВЫДАЧИ БЕЗ ОТВЕТА ПОСТАВЩИКА',
     'unapplied_events'      => 'НЕПРИНЯТЫЕ СОБЫТИЯ',
     'ledger_imbalanced'     => 'НЕСВЕДЁННЫЕ ПРОВОДКИ',
+    'unsettled_orders'      => 'ЗАВЕРШЁННЫЕ ЗАКАЗЫ С НЕПОГАШЕННЫМ ОБЯЗАТЕЛЬСТВОМ',
 ];
 
 foreach ($sections as $key => $title) {

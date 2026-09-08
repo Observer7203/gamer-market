@@ -14,7 +14,8 @@ final class CreateOrderTest extends TestCase
         $response = $this->request('POST', '/api/orders', ['sku' => 'KEY-GTA5']);
 
         self::assertSame(201, $response->status);
-        self::assertSame('KEY-GTA5', $response->body['sku']);
+        self::assertSame('KEY-GTA5', $response->body['items'][0]['sku']);
+        self::assertCount(1, $response->body['items']);
         self::assertSame(Order::CREATED, $response->body['status']);
         self::assertStringStartsWith('ord_', $response->body['order_id']);
     }
@@ -58,6 +59,51 @@ final class CreateOrderTest extends TestCase
         self::assertSame(404, $this->request('POST', '/api/orders', ['sku' => 'KEY-GTA5'])->status);
     }
 
+    public function testЗаказИзНесколькихПозиций(): void
+    {
+        $this->seedProduct('KEY-CS2', 99000, 3);
+
+        $response = $this->request('POST', '/api/orders', [
+            'items' => [['sku' => 'KEY-GTA5'], ['sku' => 'KEY-CS2'], ['sku' => 'KEY-GTA5']],
+        ]);
+
+        self::assertSame(201, $response->status);
+        self::assertCount(3, $response->body['items']);
+        self::assertSame([1, 2, 3], array_column($response->body['items'], 'position'));
+        self::assertSame(4970, $response->body['amount'], 'сумма заказа равна сумме позиций');
+        self::assertSame(3, $this->rows('order_items'));
+    }
+
+    public function testКоличествоРазворачиваетсяВОтдельныеПозиции(): void
+    {
+        $response = $this->request('POST', '/api/orders', [
+            'items' => [['sku' => 'KEY-GTA5', 'quantity' => 3]],
+        ]);
+
+        // У каждой единицы свой код и свой исход, поэтому это три позиции
+        self::assertCount(3, $response->body['items']);
+        self::assertSame(5970, $response->body['amount']);
+    }
+
+    public function testНеизвестныйАртикулОтменяетВесьЗаказ(): void
+    {
+        $response = $this->request('POST', '/api/orders', [
+            'items' => [['sku' => 'KEY-GTA5'], ['sku' => 'NO-SUCH-SKU']],
+        ]);
+
+        self::assertSame(404, $response->status);
+        self::assertSame(0, $this->rows('orders'), 'заказ не создан частично');
+        self::assertSame(0, $this->rows('order_items'));
+    }
+
+    public function testПустойСоставНеПринимается(): void
+    {
+        $response = $this->request('POST', '/api/orders', ['items' => []]);
+
+        self::assertSame(400, $response->status);
+        self::assertSame('invalid_request', $response->body['error']['code']);
+    }
+
     public function testОтсутствующийАртикулВЗапросе(): void
     {
         $response = $this->request('POST', '/api/orders', []);
@@ -73,7 +119,7 @@ final class CreateOrderTest extends TestCase
 
         self::assertSame(200, $response->status);
         self::assertSame($created['order_id'], $response->body['order_id']);
-        self::assertArrayNotHasKey('delivery', $response->body, 'код до выдачи не показывается');
+        self::assertArrayNotHasKey('code', $response->body['items'][0], 'код до выдачи не показывается');
     }
 
     public function testЧтениеНесуществующегоЗаказа(): void

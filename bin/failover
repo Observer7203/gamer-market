@@ -204,11 +204,11 @@ function bothDown(Container $c, Connection $db, string $base, string $sku): arra
 
     return [
         'facts' => [
-            'после отказа'   => ['статус' => $afterFailure['статус'], 'выдача' => $afterFailure['выдача']],
+            'после отказа'   => ['позиция' => $afterFailure['позиция'], 'выдача' => $afterFailure['выдача']],
             'после подъёма'  => ['статус' => $final['статус'], 'поставщик' => $final['поставщик']],
         ],
         'checks' => [
-            'состояние восстановимое'     => $afterFailure['статус'] === 'delivery_failed',
+            'состояние восстановимое'     => $afterFailure['позиция'] === 'failed',
             'кодов не списано'            => $afterFailure['кодов'] === 0,
             'приложение отвечает'         => health($base) === 200,
             'после подъёма заказ выдан'   => $final['статус'] === 'delivered',
@@ -224,7 +224,8 @@ function bothDown(Container $c, Connection $db, string $base, string $sku): arra
 function inspect(Connection $db, string $orderId): array
 {
     $order = $db->selectOne('SELECT status FROM orders WHERE id = ?', [$orderId]);
-    $delivery = $db->selectOne('SELECT * FROM deliveries WHERE order_id = ?', [$orderId]);
+    $item = $db->selectOne('SELECT status FROM order_items WHERE order_id = ? AND position = 1', [$orderId]);
+    $delivery = $db->selectOne('SELECT * FROM deliveries WHERE order_id = ? AND position = 1', [$orderId]);
     $stock = $db->select(
         'SELECT provider, code FROM provider_stock WHERE request_id LIKE ?',
         ['%' . $orderId . '%']
@@ -237,6 +238,7 @@ function inspect(Connection $db, string $orderId): array
 
     return [
         'статус'      => $order['status'] ?? '?',
+        'позиция'     => $item['status'] ?? '?',
         'выдача'      => $delivery['status'] ?? '—',
         'поставщик'   => $delivery['provider'] ?? '—',
         'код'         => $delivery['code'] ?? null,
