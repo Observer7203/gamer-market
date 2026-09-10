@@ -48,6 +48,7 @@ foreach ($scenarios as $name => [$title, $handler]) {
     printf("── %s\n", $title);
 
     for ($run = 1; $run <= $repeat; $run++) {
+        liftRateLimit($container);
         ensureStock($db, $sku, 5);
         $result = $handler($container, $db, $base, $sku);
 
@@ -343,5 +344,38 @@ function drainQueue(Container $container): void
 
     for ($i = 0; $i < 50 && $worker->tick(); $i++) {
         // задачи обрабатываются по одной
+    }
+}
+
+/**
+ * Лимит поставщика этому сценарию не мешает.
+ *
+ * Ограничение частоты проверяется отдельным сценарием, здесь оно только
+ * помешало бы: журнал обращений мог остаться заполненным от прошлых прогонов.
+ */
+function liftRateLimit(Container $c): void
+{
+    $limiter = $c->get(App\Services\ProviderRateLimiter::class);
+
+    foreach (['a', 'b'] as $provider) {
+        $limiter->configure($provider, 1_000_000);
+    }
+
+    $limiter->prune(0);
+
+    // Лимит окружения возвращается на место при завершении: база разработки
+    // общая, и оставлять её без ограничения нельзя.
+    static $restored = false;
+
+    if (!$restored) {
+        $restored = true;
+
+        register_shutdown_function(static function () use ($limiter): void {
+            $default = (require dirname(__DIR__) . '/config/config.php')['delivery']['rate_limit'];
+
+            foreach (['a', 'b'] as $provider) {
+                $limiter->configure($provider, $default);
+            }
+        });
     }
 }

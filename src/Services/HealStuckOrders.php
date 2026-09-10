@@ -24,6 +24,9 @@ final class HealStuckOrders
     /** Задача считается брошенной, если исполнитель не завершил её за это время. */
     private const LEASE_SECONDS = 300;
 
+    /** Сколько хранить выполненные задачи. */
+    private const DONE_RETENTION_SECONDS = 86400;
+
     /** Заказ считается зависшим, если не завершился за это время после оплаты. */
     private const STUCK_AFTER_SECONDS = 120;
 
@@ -32,6 +35,7 @@ final class HealStuckOrders
         private readonly Queue $queue,
         private readonly ApplyPaymentEvents $applyPaymentEvents,
         private readonly FinalizeOrder $finalizeOrder,
+        private readonly ProviderRateLimiter $rateLimiter,
         private readonly Logger $logger,
     ) {
     }
@@ -45,6 +49,12 @@ final class HealStuckOrders
             'applied_events'    => $this->applyPendingEvents(),
             'requeued_items'    => $this->requeueUnfinishedItems(),
             'finalized_orders'  => $this->finalizeSettledOrders(),
+
+            // Журнал обращений к поставщикам нужен только для скользящего окна
+            // и для проверки пика. Без очистки он рос бы вместе с числом
+            // обращений, отвечая всё на тот же вопрос.
+            'pruned_calls'      => $this->rateLimiter->prune(),
+            'pruned_jobs'       => $this->pruneDoneJobs(),
         ];
 
         if (array_sum($healed) > 0) {
@@ -106,6 +116,25 @@ final class HealStuckOrders
     }
 
     /**
+     * Удаление выполненных задач.
+     *
+     * Очередь — рабочий инструмент, а не история: что произошло с заказом,
+     * записано в самом заказе, выдаче и журнале денег. Выборку задач
+     * накопленное не замедляет — индекс частичный и хранит только ожидающие,
+     * — но таблица росла бы без предела.
+     *
+     * Проваленные задачи не удаляются: они требуют разбора.
+     */
+    private function pruneDoneJobs(): int
+    {
+        return $this->db->execute(
+            "DELETE FROM jobs
+              WHERE status = 'done' AND locked_at < now() - make_interval(secs => ?)",
+            [self::DONE_RETENTION_SECONDS]
+        );
+    }
+
+    /**
      * Освобождение позиций, брошенных посреди выдачи.
      *
      * Исполнитель мог быть остановлен между занятием позиции и записью
@@ -144,7 +173,7 @@ final class HealStuckOrders
     private function requeueUnfinishedItems(): int
     {
         $items = $this->db->select(
-            "SELECT i.order_id, i.position
+            "SELECT i.order_id, i.position, o.status
                FROM order_items i
                JOIN orders o ON o.id = i.order_id
               WHERE i.settled_at IS NULL
@@ -160,10 +189,15 @@ final class HealStuckOrders
         );
 
         foreach ($items as $row) {
-            $this->queue->push('deliver_item', [
-                'order_id' => (string) $row['order_id'],
-                'position' => (int) $row['position'],
-            ]);
+            // Оплаченный заказ — обязательство перед покупателем, оно
+            // обслуживается раньше. Неоплаченный ждёт своей очереди.
+            $this->queue->push(
+                'deliver_item',
+                ['order_id' => (string) $row['order_id'], 'position' => (int) $row['position']],
+                priority: (string) $row['status'] === Order::CREATED
+                    ? Queue::UNPAID_DELIVERY
+                    : Queue::PAID_DELIVERY,
+            );
 
             $this->logger->info('heal_requeued_item', [
                 'channel'  => 'delivery',

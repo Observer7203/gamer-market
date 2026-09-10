@@ -394,6 +394,27 @@ paths:
                 database: down
                 php: 8.3.33
 
+  /api/admin/queue:
+    get:
+      operationId: getQueueProgress
+      tags: [Служебные]
+      summary: Прогресс очереди
+      description: |
+        Под всплеском очередь длиннее пропускной способности поставщика,
+        и вопрос «когда выдадут» становится законным. Без ответа на него
+        система выглядит зависшей, хотя работает.
+
+        Оценка времени считается из лимита поставщиков, а не из наблюдаемой
+        скорости: скорость — следствие лимита, и при пустой очереди её просто
+        нет. Это оценка сверху.
+      responses:
+        "200":
+          description: Состояние очереди
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueueProgress"
+
   /stubs/provider-{provider}/issue:
     post:
       operationId: stubIssue
@@ -751,6 +772,66 @@ components:
             Время возникновения события у платёжной системы. Задаёт порядок
             применения, не связанный с порядком доставки.
           example: "2026-01-01T12:00:00Z"
+
+    QueueProgress:
+      type: object
+      properties:
+        generated_at:
+          type: string
+        queue:
+          type: object
+          properties:
+            pending:
+              type: integer
+              description: Задачи, готовые к выдаче прямо сейчас
+            deferred:
+              type: integer
+              description: Отложенные до срока — ждут места в лимите поставщика
+            running: {type: integer}
+            failed: {type: integer}
+            paid_ahead:
+              type: integer
+              description: Сколько из ожидающих относятся к оплаченным заказам
+        items:
+          type: object
+          properties:
+            awaiting:
+              type: integer
+              description: |
+                Позиции оплаченных заказов, по которым покупатель ждёт.
+            unpaid:
+              type: integer
+              description: |
+                Позиции неоплаченных заказов: в очередь не попадают и квоту
+                поставщика не расходуют.
+            delivered: {type: integer}
+            refunded: {type: integer}
+            unresolved: {type: integer}
+        providers:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              limit_per_minute: {type: integer}
+              used:
+                type: integer
+                description: Занято мест в текущем скользящем окне
+              available: {type: integer}
+          example:
+            a: {limit_per_minute: 15, used: 15, available: 0}
+            b: {limit_per_minute: 15, used: 5, available: 10}
+        throughput:
+          type: object
+          properties:
+            limit_per_minute:
+              type: integer
+              description: Сумма лимитов поставщиков
+            delivered_last_minute: {type: integer}
+            waiting: {type: integer}
+            eta_seconds:
+              type: integer
+              nullable: true
+              description: Оценка сверху, за сколько разойдётся очередь
 
     ReconciliationReport:
       type: object

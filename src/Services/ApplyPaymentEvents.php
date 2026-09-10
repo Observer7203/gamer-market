@@ -88,10 +88,11 @@ final class ApplyPaymentEvents
             // На каждую позицию своя задача: они выполняются независимо
             // и провал одной не мешает остальным.
             foreach ($this->positions($order->id) as $position) {
-                $this->queue->push('deliver_item', [
-                    'order_id' => $order->id,
-                    'position' => $position,
-                ]);
+                $this->queue->push(
+                    'deliver_item',
+                    ['order_id' => $order->id, 'position' => $position],
+                    priority: Queue::PAID_DELIVERY,
+                );
             }
 
             $this->ledger->recordPayment(

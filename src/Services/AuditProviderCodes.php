@@ -167,7 +167,11 @@ final class AuditProviderCodes
         );
 
         if ($exists === null) {
-            $this->queue->push('deliver_item', ['order_id' => $orderId, 'position' => $position]);
+            $this->queue->push(
+                'deliver_item',
+                ['order_id' => $orderId, 'position' => $position],
+                priority: Queue::PAID_DELIVERY,
+            );
         }
     }
 }

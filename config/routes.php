@@ -6,6 +6,7 @@ use App\Controllers\CatalogController;
 use App\Controllers\HealthController;
 use App\Controllers\OrderController;
 use App\Controllers\PaymentWebhookController;
+use App\Controllers\QueueController;
 use App\Controllers\ReconciliationController;
 use App\Http\Router;
 use App\Controllers\ProviderStubController;
@@ -27,6 +28,10 @@ return static function (Router $router): void {
 
     // Сверка: расхождения между полученными деньгами и выданным товаром.
     $router->get('/api/admin/reconciliation', [ReconciliationController::class, 'show']);
+
+    // Прогресс очереди под нагрузкой: сколько ждёт, сколько выдано,
+    // сколько места осталось в лимите поставщиков.
+    $router->get('/api/admin/queue', [QueueController::class, 'show']);
 
     // Заглушка поставщика: отдельный сервис, размещённый в том же приложении
     // ради простоты запуска.

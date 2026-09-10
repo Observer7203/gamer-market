@@ -1,0 +1,353 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+use App\Database\Connection;
+use App\Queue\Worker;
+use App\Services\ProviderRateLimiter;
+use App\Services\QueueProgress;
+use App\Support\Container;
+
+/**
+ * Воспроизводимая проверка всплеска заказов при ограниченном поставщике.
+ *
+ * Заказов приходит в разы больше, чем поставщик готов обслужить за минуту.
+ * Проверяется, что ничего не потеряно, лимит не превышен ни в одном окне,
+ * оплаченные обслужены раньше неоплаченных, а прогресс виден в любой момент.
+ *
+ * Ненулевой код возврата означает нарушение.
+ *
+ *   php bin/surge
+ *   php bin/surge --orders=60 --limit=30 --workers=8
+ */
+
+/** @var Container $container */
+$container = require dirname(__DIR__) . '/src/bootstrap.php';
+$db = $container->get(Connection::class);
+$limiter = $container->get(ProviderRateLimiter::class);
+$progress = $container->get(QueueProgress::class);
+
+$options = getopt('', ['orders::', 'limit::', 'workers::', 'seconds::', 'url::']);
+// Значения по умолчанию подобраны так, чтобы всплеск действительно случился:
+// оплаченных заказов вдвое больше, чем поставщики примут за минуту. При
+// избыточной пропускной способности очередь расходится мгновенно и проверять
+// нечего.
+$orders   = max(1, (int) ($options['orders'] ?? 80));
+$limit    = max(1, (int) ($options['limit'] ?? 10));
+$workers  = max(1, (int) ($options['workers'] ?? 8));
+$seconds  = max(5, (int) ($options['seconds'] ?? 75));
+$base     = rtrim($options['url'] ?? (getenv('APP_URL') ?: 'http://nginx'), '/');
+
+const SKU = 'KEY-SURGE';
+
+printf(
+    "Проверка всплеска\n  заказов: %d\n  лимит поставщика: %d/мин на каждого\n"
+    . "  исполнителей: %d\n  окно наблюдения: %d с\n\n",
+    $orders, $limit, $workers, $seconds
+);
+
+prepare($db, $orders);
+
+foreach (['a', 'b'] as $provider) {
+    $limiter->configure($provider, $limit);
+    behavior($base, $provider, 'ok');
+}
+
+// Половина заказов оплачивается, половина остаётся неоплаченной. Работа
+// по неоплаченным ставится в очередь с низким приоритетом: так проверяется,
+// что оплаченные обслуживаются раньше.
+$paid = [];
+$unpaid = [];
+
+for ($i = 0; $i < $orders; $i++) {
+    $orderId = createOrder($base);
+
+    if ($i % 2 === 0) {
+        pay($base, $orderId);
+        $paid[] = $orderId;
+    } else {
+        queueUnpaid($container, $orderId);
+        $unpaid[] = $orderId;
+    }
+}
+
+printf("создано: %d оплаченных, %d неоплаченных\n\n", count($paid), count($unpaid));
+
+$startedAt = microtime(true);
+$children = spawnWorkers($workers, $seconds);
+
+$all = array_merge($paid, $unpaid);
+
+// Прогресс печатается, пока исполнители работают: под всплеском это
+// единственный способ понять, что система жива, а не зависла.
+while (microtime(true) - $startedAt < $seconds) {
+    $snapshot = $progress->snapshot();
+
+    printf(
+        "  %5.1f с  в очереди %3d (оплаченных %3d)  в работе %d  выдано %3d из %d  "
+        . "лимит a %2d/%d b %2d/%d  осталось ~%s\n",
+        microtime(true) - $startedAt,
+        $snapshot['queue']['pending'] + $snapshot['queue']['deferred'],
+        $snapshot['queue']['paid_ahead'],
+        $snapshot['queue']['running'],
+        delivered($db, $all),
+        count($paid),
+        $snapshot['providers']['a']['used'], $snapshot['providers']['a']['limit_per_minute'],
+        $snapshot['providers']['b']['used'], $snapshot['providers']['b']['limit_per_minute'],
+        $snapshot['throughput']['eta_seconds'] === null ? '—' : $snapshot['throughput']['eta_seconds'] . ' с',
+    );
+
+    sleep(2);
+}
+
+foreach ($children as $pid) {
+    pcntl_waitpid($pid, $status);
+}
+
+echo "\n";
+
+$result = inspect($db, $limiter, $paid, $unpaid, $limit);
+
+foreach ($result['facts'] as $name => $value) {
+    printf("  %s: %s\n", $name, is_array($value) ? json_encode($value, JSON_UNESCAPED_UNICODE) : $value);
+}
+
+echo "\n";
+
+$broken = array_filter($result['checks'], static fn (bool $ok): bool => !$ok);
+
+foreach ($result['checks'] as $name => $ok) {
+    printf("  %s %s\n", $ok ? 'ок      ' : 'НАРУШЕНО', $name);
+}
+
+// Лимит возвращается к значению окружения: скрипт менял его на время
+// прогона, а база разработки общая с остальными сценариями.
+$default = (require dirname(__DIR__) . '/config/config.php')['delivery']['rate_limit'];
+
+foreach (['a', 'b'] as $provider) {
+    $limiter->configure($provider, $default);
+}
+
+$limiter->prune(0);
+
+printf("\nлимит возвращён к %d/мин\n", $default);
+printf("Проверок: %d, нарушений: %d\n", count($result['checks']), count($broken));
+exit($broken === [] ? 0 : 1);
+
+
+// ── проверка итога ──────────────────────────────────────────────────────────
+
+/**
+ * @param list<string> $paid
+ * @param list<string> $unpaid
+ * @return array{checks: array<string, bool>, facts: array<string, mixed>}
+ */
+function inspect(Connection $db, ProviderRateLimiter $limiter, array $paid, array $unpaid, int $limit): array
+{
+    $peak = $limiter->peak();
+    $exceeded = array_filter($peak, static fn (int $calls): bool => $calls > $limit);
+
+    $paidDelivered = settled($db, $paid);
+    $unpaidDelivered = delivered($db, $unpaid);
+
+    // Ни одна позиция не должна пропасть: либо завершена, либо ещё в очереди.
+    $lost = (int) $db->selectOne(
+        "SELECT count(*) AS n
+           FROM order_items i
+           JOIN orders o ON o.id = i.order_id
+          WHERE o.status IN ('paid', 'delivering')
+            AND i.settled_at IS NULL
+            AND NOT EXISTS (
+                SELECT 1 FROM jobs j
+                 WHERE j.status IN ('pending', 'running')
+                   AND j.payload->>'order_id' = i.order_id
+                   AND (j.payload->>'position')::int = i.position
+            )",
+        []
+    )['n'];
+
+    $failedJobs = (int) $db->selectOne("SELECT count(*) AS n FROM jobs WHERE status = 'failed'")['n'];
+
+    return [
+        'facts' => [
+            'оплаченных завершено'   => sprintf('%d из %d', $paidDelivered, count($paid)),
+            'неоплаченных выдано'    => sprintf('%d из %d', $unpaidDelivered, count($unpaid)),
+            'пик обращений в окне'   => $peak,
+            'лимит'                  => $limit,
+            'позиций потеряно'       => $lost,
+            'проваленных задач'      => $failedJobs,
+        ],
+        'checks' => [
+            'лимит поставщика не превышен ни в одном окне' => $exceeded === [],
+            'ни одна позиция не потеряна'                  => $lost === 0,
+            'задачи не помечены проваленными'              => $failedJobs === 0,
+            'оплаченные обслужены'                         => $paidDelivered > 0,
+            'оплаченные обслужены раньше неоплаченных'     => $paidDelivered > $unpaidDelivered,
+        ],
+    ];
+}
+
+/** @param list<string> $orders */
+function settled(Connection $db, array $orders): int
+{
+    if ($orders === []) {
+        return 0;
+    }
+
+    $in = implode(',', array_map(static fn (string $id): string => "'" . $id . "'", $orders));
+
+    return (int) $db->selectOne(
+        "SELECT count(*) AS n FROM order_items
+          WHERE order_id IN ($in) AND settled_at IS NOT NULL"
+    )['n'];
+}
+
+/** @param list<string> $orders */
+function delivered(Connection $db, array $orders): int
+{
+    if ($orders === []) {
+        return 0;
+    }
+
+    $in = implode(',', array_map(static fn (string $id): string => "'" . $id . "'", $orders));
+
+    return (int) $db->selectOne(
+        "SELECT count(*) AS n FROM order_items
+          WHERE order_id IN ($in) AND status = 'delivered'"
+    )['n'];
+}
+
+
+// ── вспомогательное ─────────────────────────────────────────────────────────
+
+/**
+ * Исполнители в отдельных процессах.
+ *
+ * Лимит поставщика общий, и проверять его имеет смысл только тогда, когда
+ * за место претендуют независимые процессы: счётчик в памяти
+ * одного процесса ничего не доказывает.
+ *
+ * @return list<int>
+ */
+function spawnWorkers(int $count, int $seconds): array
+{
+    $children = [];
+
+    for ($i = 0; $i < $count; $i++) {
+        $pid = pcntl_fork();
+
+        if ($pid === 0) {
+            // Дочернему процессу нужно собственное подключение: сокет
+            // родителя унаследован и одновременное использование его портит.
+            $child = require dirname(__DIR__) . '/src/bootstrap.php';
+            $worker = $child->get(Worker::class);
+            $until = microtime(true) + $seconds;
+
+            while (microtime(true) < $until) {
+                if (!$worker->tick()) {
+                    usleep(200_000);
+                }
+            }
+
+            // Завершение без деструкторов: обычный выход закрыл бы
+            // унаследованный сокет родителя.
+            posix_kill(getmypid(), SIGKILL);
+        }
+
+        $children[] = $pid;
+    }
+
+    return $children;
+}
+
+function createOrder(string $base): string
+{
+    $body = post($base . '/api/orders', ['sku' => SKU]);
+
+    if (!isset($body['order_id'])) {
+        fwrite(STDERR, 'Не удалось создать заказ: ' . json_encode($body, JSON_UNESCAPED_UNICODE) . "\n");
+        exit(2);
+    }
+
+    return (string) $body['order_id'];
+}
+
+function pay(string $base, string $orderId): void
+{
+    post($base . '/api/webhooks/payment', [
+        'event_id'   => 'evt_' . bin2hex(random_bytes(6)),
+        'order_id'   => $orderId,
+        'status'     => 'paid',
+        'amount'     => 1990,
+        'currency'   => 'RUB',
+        'created_at' => gmdate('Y-m-d\TH:i:s\Z'),
+    ]);
+}
+
+/**
+ * Работа по неоплаченному заказу.
+ *
+ * Ставится с низким приоритетом. Выдачи не произойдёт — захват позиции
+ * требует оплаченного заказа, — но место в очереди она занимает, и именно
+ * это проверяется: оплаченные не должны ждать за ней.
+ */
+function queueUnpaid(Container $c, string $orderId): void
+{
+    $c->get(App\Queue\Queue::class)->push(
+        'deliver_item',
+        ['order_id' => $orderId, 'position' => 1],
+        priority: App\Queue\Queue::UNPAID_DELIVERY,
+    );
+}
+
+function behavior(string $base, string $provider, string $mode): void
+{
+    post($base . "/stubs/provider-$provider/behavior", ['mode' => $mode]);
+}
+
+/** Товар со своим складом: всплеск не должен зависеть от остальных данных. */
+function prepare(Connection $db, int $orders): void
+{
+    $db->execute(
+        "INSERT INTO products (sku, name, type, price_minor, currency)
+              VALUES (?, ?, 'key', 199000, 'RUB')
+         ON CONFLICT (sku) DO UPDATE SET is_active = true",
+        [SKU, SKU]
+    );
+
+    foreach (['a', 'b'] as $provider) {
+        $available = count($db->select(
+            'SELECT 1 FROM provider_stock WHERE provider = ? AND sku = ? AND request_id IS NULL',
+            [$provider, SKU]
+        ));
+
+        for ($i = $available; $i < $orders + 10; $i++) {
+            $db->execute(
+                'INSERT INTO provider_stock (provider, sku, code) VALUES (?, ?, ?)
+                 ON CONFLICT DO NOTHING',
+                [$provider, SKU, strtoupper($provider) . '-SRG-' . bin2hex(random_bytes(5))]
+            );
+        }
+    }
+
+    // Журнал обращений очищается: пик считается по этому прогону.
+    $db->execute('DELETE FROM provider_calls');
+}
+
+/** @param array<string, mixed> $payload @return array<string, mixed> */
+function post(string $url, array $payload): array
+{
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_POST           => true,
+        CURLOPT_POSTFIELDS     => json_encode($payload, JSON_UNESCAPED_UNICODE),
+        CURLOPT_HTTPHEADER     => ['Content-Type: application/json'],
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT        => 30,
+    ]);
+    $body = json_decode((string) curl_exec($ch), true);
+    curl_close($ch);
+
+    return is_array($body) ? $body : [];
+}

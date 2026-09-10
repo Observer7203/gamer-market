@@ -1,0 +1,84 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+use App\Services\QueueProgress;
+use App\Support\Container;
+
+/**
+ * Прогресс очереди: сколько ждёт, сколько выдано, сколько места в лимите.
+ *
+ *   php bin/queue
+ *   php bin/queue --watch
+ *   php bin/queue --json
+ */
+
+/** @var Container $container */
+$container = require dirname(__DIR__) . '/src/bootstrap.php';
+$progress = $container->get(QueueProgress::class);
+
+$options = getopt('', ['watch::', 'interval::', 'json']);
+$watch = array_key_exists('watch', $options);
+$interval = max(1, (int) ($options['interval'] ?? 2));
+
+do {
+    $snapshot = $progress->snapshot();
+
+    if (isset($options['json'])) {
+        echo json_encode($snapshot, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), "\n";
+    } else {
+        render($snapshot);
+    }
+
+    if ($watch) {
+        sleep($interval);
+
+        // Экран очищается, а не дописывается: наблюдать имеет смысл
+        // за изменением чисел, а не за лентой одинаковых блоков.
+        echo "\033[H\033[2J";
+    }
+} while ($watch);
+
+/** @param array<string, mixed> $snapshot */
+function render(array $snapshot): void
+{
+    $pad = static fn (string $text, int $width): string
+        => $text . str_repeat(' ', max(1, $width - mb_strlen($text)));
+
+    printf("Очередь на %s\n\n", $snapshot['generated_at']);
+
+    printf("  %s %d\n", $pad('готовы к выдаче', 28), $snapshot['queue']['pending']);
+    printf("  %s %d\n", $pad('из них оплаченные', 28), $snapshot['queue']['paid_ahead']);
+    printf("  %s %d\n", $pad('отложены до срока', 28), $snapshot['queue']['deferred']);
+    printf("  %s %d\n", $pad('в работе', 28), $snapshot['queue']['running']);
+    printf("  %s %d\n", $pad('провалены', 28), $snapshot['queue']['failed']);
+
+    echo "\nПозиции:\n";
+    printf("  %s %d\n", $pad('ждут выдачи', 28), $snapshot['items']['awaiting']);
+    printf("  %s %d\n", $pad('без оплаты', 28), $snapshot['items']['unpaid']);
+    printf("  %s %d\n", $pad('выдано', 28), $snapshot['items']['delivered']);
+    printf("  %s %d\n", $pad('возвращено', 28), $snapshot['items']['refunded']);
+    printf("  %s %d\n", $pad('без ответа поставщика', 28), $snapshot['items']['unresolved']);
+
+    echo "\nЛимиты поставщиков, запросов в минуту:\n";
+    foreach ($snapshot['providers'] as $provider => $limit) {
+        printf(
+            "  %s занято %d из %d, свободно %d\n",
+            $pad($provider, 28),
+            $limit['used'],
+            $limit['limit_per_minute'],
+            $limit['available'],
+        );
+    }
+
+    $throughput = $snapshot['throughput'];
+
+    printf("\n  %s %d\n", $pad('пропускная способность', 28), $throughput['limit_per_minute']);
+    printf("  %s %d\n", $pad('выдано за минуту', 28), $throughput['delivered_last_minute']);
+    printf(
+        "  %s %s\n",
+        $pad('очередь разойдётся за', 28),
+        $throughput['eta_seconds'] === null ? '—' : $throughput['eta_seconds'] . ' с',
+    );
+}

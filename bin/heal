@@ -26,7 +26,9 @@ $audited = ($container->get(AuditProviderCodes::class))();
 // Молчание при отсутствии работы: планировщик выполняет доводку каждую
 // минуту, и постоянный вывод забивал бы журнал контейнера. Проверенные
 // запросы работой не считаются — они есть почти всегда.
-$worked = array_sum($healed) + $audited['recovered'] + $audited['resolved'];
+// Очистка журнала обращений работой не считается: она идёт постоянно.
+$worked = array_sum($healed) - $healed['pruned_calls'] - $healed['pruned_jobs']
+    + $audited['recovered'] + $audited['resolved'];
 
 if ($worked === 0 && !in_array('--verbose', $argv, true)) {
     exit(0);
@@ -40,6 +42,12 @@ printf(
     $healed['applied_events'],
     $healed['requeued_items'],
     $healed['finalized_orders'],
+);
+
+printf(
+    "удалено: обращений к поставщикам %d, выполненных задач %d\n",
+    $healed['pruned_calls'],
+    $healed['pruned_jobs'],
 );
 
 printf(

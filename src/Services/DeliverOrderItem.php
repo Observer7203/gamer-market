@@ -40,6 +40,25 @@ use App\Support\Logger;
  */
 final class DeliverOrderItem
 {
+    /**
+     * Исход «места в лимите поставщика нет». Не ошибка и не отказ: обращения
+     * не было, и повторять его нужно позже, а не считать попыткой.
+     */
+    public const THROTTLED = 'throttled';
+
+    /**
+     * Состояние выдачи, соответствующее состоянию позиции. Нужно при возврате
+     * позиции в прежнее состояние: обе строки описывают один и тот же факт.
+     *
+     * @var array<string, string>
+     */
+    private const DELIVERY_STATE = [
+        OrderItem::PENDING      => Delivery::PENDING,
+        OrderItem::OUT_OF_STOCK => Delivery::OUT_OF_STOCK,
+        OrderItem::FAILED       => Delivery::FAILED,
+        OrderItem::UNRESOLVED   => Delivery::UNRESOLVED,
+    ];
+
     /** @param list<string> $providers порядок задаёт приоритет */
     public function __construct(
         private readonly Connection $db,
@@ -49,6 +68,7 @@ final class DeliverOrderItem
         private readonly FinalizeOrder $finalizeOrder,
         private readonly AcceptProviderCode $acceptCode,
         private readonly Discrepancies $discrepancies,
+        private readonly ProviderRateLimiter $rateLimiter,
         private readonly Logger $logger,
         private readonly array $providers = ['a', 'b'],
         private readonly int $maxAttempts = 3,
@@ -57,7 +77,7 @@ final class DeliverOrderItem
     ) {
     }
 
-    /** @return string исход: delivered | refunded | out_of_stock | failed | unresolved | noop */
+    /** @return string исход: delivered | refunded | out_of_stock | failed | unresolved | throttled | noop */
     public function __invoke(string $orderId, int $position): string
     {
         $claim = $this->claim($orderId, $position);
@@ -78,6 +98,15 @@ final class DeliverOrderItem
             (string) $claim['sku'],
             (int) $claim['generation'],
         );
+
+        // Лимит поставщика исчерпан: обращения не было, состояние позиции
+        // не изменилось. Освобождаем её и откладываем работу.
+        if ($result['outcome'] === self::THROTTLED) {
+            $this->release($orderId, $position, (string) $claim['previous']);
+
+            return self::THROTTLED;
+        }
+
         $outcome = $this->store($orderId, $position, $result);
 
         if ($outcome === 'delivered') {
@@ -107,7 +136,7 @@ final class DeliverOrderItem
      * Одно условное обновление отвечает сразу на три вопроса: не занята ли
      * позиция другим исполнителем, оплачен ли заказ и не завершена ли она уже.
      *
-     * @return array{sku: string, attempts: int, generation: int}|null
+     * @return array{sku: string, attempts: int, generation: int, previous: string}|null
      */
     private function claim(string $orderId, int $position): ?array
     {
@@ -128,7 +157,7 @@ final class DeliverOrderItem
                     AND d.status <> ?
                     AND i.status IN (?, ?, ?, ?)
                     AND o.status IN (?, ?)
-              RETURNING i.sku, d.attempts, d.generation',
+              RETURNING i.sku, d.attempts, d.generation, i.status AS previous',
                 [
                     Delivery::IN_FLIGHT, $orderId, $position,
                     Delivery::IN_FLIGHT,
@@ -155,8 +184,42 @@ final class DeliverOrderItem
                 'sku'        => (string) $claimed['sku'],
                 'attempts'   => (int) $claimed['attempts'],
                 'generation' => (int) $claimed['generation'],
+                // Состояние до захвата: строка order_items этим оператором
+                // не менялась, поэтому RETURNING отдаёт прежнее значение.
+                'previous'   => (string) $claimed['previous'],
             ];
         });
+    }
+
+    /**
+     * Возврат позиции в прежнее состояние.
+     *
+     * Обращения к поставщику не было, значит и попытки не было: счётчик
+     * возвращается назад. Иначе всплеск исчерпал бы бюджет попыток
+     * и позиции, которые ничем не больны, ушли бы в возврат денег.
+     */
+    private function release(string $orderId, int $position, string $previous): void
+    {
+        $this->db->transaction(function (Connection $db) use ($orderId, $position, $previous): void {
+            $db->execute(
+                'UPDATE deliveries
+                    SET status = ?, attempts = greatest(0, attempts - 1)
+                  WHERE order_id = ? AND position = ? AND status = ?',
+                [self::DELIVERY_STATE[$previous] ?? Delivery::PENDING, $orderId, $position, Delivery::IN_FLIGHT]
+            );
+
+            $db->execute(
+                'UPDATE order_items SET status = ? WHERE order_id = ? AND position = ? AND status = ?',
+                [$previous, $orderId, $position, OrderItem::DELIVERING]
+            );
+        });
+
+        $this->logger->info('delivery_deferred', [
+            'channel'  => 'delivery',
+            'order_id' => $orderId,
+            'position' => $position,
+            'previous' => $previous,
+        ]);
     }
 
     /**
@@ -167,12 +230,32 @@ final class DeliverOrderItem
     private function obtainCode(string $orderId, int $position, string $sku, int $generation): array
     {
         $rejected = false;
+        $throttled = false;
+        $called = false;
         $last = null;
 
         foreach ($this->providers as $provider) {
             $requestId = OrderItem::requestIdFor($orderId, $position, $provider, $generation);
 
             for ($attempt = 1; $attempt <= $this->maxAttempts; $attempt++) {
+                // Место в лимите занимается перед каждым обращением, а не раз
+                // на заход: повторы — такие же запросы к поставщику.
+                if (!$this->rateLimiter->acquire($provider)) {
+                    $throttled = true;
+
+                    // К этому поставщику ещё не обращались: можно попробовать
+                    // следующего, у него свой лимит.
+                    if ($attempt === 1) {
+                        continue 2;
+                    }
+
+                    // Обращение уже было и осталось без ответа. Переключаться
+                    // нельзя, а ждать места — значит держать позицию занятой.
+                    // Оставляем неопределённость, повтор разберёт её позже.
+                    break;
+                }
+
+                $called = true;
                 $response = $this->provider->issue($provider, $requestId, $sku, $orderId);
                 $this->recordAttempt($orderId, $position, $provider, $requestId, $attempt, $generation, $response);
 
@@ -265,6 +348,13 @@ final class DeliverOrderItem
                     'request_id' => $requestId, 'code' => null, 'reason' => 'timeout'];
         }
 
+        // Ни одного обращения не состоялось: у всех поставщиков нет места.
+        // Позиция не тронута, работа откладывается.
+        if (!$called && $throttled) {
+            return ['outcome' => self::THROTTLED, 'provider' => '', 'request_id' => '',
+                    'code' => null, 'reason' => 'rate_limited'];
+        }
+
         if ($rejected) {
             return ['outcome' => ProviderClient::ERROR, 'provider' => '', 'request_id' => '',
                     'code' => null, 'reason' => 'code_rejected'];
@@ -290,6 +380,12 @@ final class DeliverOrderItem
         int $position,
         string $reason
     ): ?array {
+        // Запрос состояния — такое же обращение к поставщику и место в лимите
+        // занимает наравне с выдачей.
+        if (!$this->rateLimiter->acquire($provider)) {
+            return null;
+        }
+
         $status = $this->provider->status($provider, $requestId);
 
         if ($status['outcome'] !== ProviderClient::OK || $status['code'] === null) {

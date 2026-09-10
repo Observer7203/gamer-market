@@ -9,6 +9,7 @@ use App\Http\Dispatcher;
 use App\Http\Request;
 use App\Http\Response;
 use App\Services\ProviderClient;
+use App\Services\ProviderRateLimiter;
 use App\Queue\Worker;
 use Tests\Support\LocalProviderClient;
 use App\Support\Container;
@@ -36,7 +37,7 @@ abstract class TestCase extends BaseTestCase
 
         $this->db->raw(
             'TRUNCATE ledger_entries, delivery_attempts, issued_codes,
-                      provider_discrepancies, deliveries, jobs,
+                      provider_discrepancies, deliveries, jobs, provider_calls,
                       payment_events, order_items, orders, provider_stock,
                       provider_settings, products
              RESTART IDENTITY CASCADE'
@@ -53,6 +54,10 @@ abstract class TestCase extends BaseTestCase
                 'INSERT INTO provider_settings (provider, mode) VALUES (?, ?)',
                 [$provider, 'ok']
             );
+
+            // Лимит по умолчанию не должен мешать: проверки, где он важен,
+            // задают его сами.
+            $this->container->get(ProviderRateLimiter::class)->configure($provider, 100_000);
         }
 
         $this->seedProduct('KEY-GTA5', 199000, $codes);

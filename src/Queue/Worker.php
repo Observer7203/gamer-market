@@ -24,6 +24,9 @@ final class Worker
     private const MAX_ATTEMPTS = 8;
     private const IDLE_SLEEP_US = 200_000;
 
+    /** Отсрочка при исчерпанном лимите поставщика. */
+    private const THROTTLED_DELAY_SECONDS = 2;
+
     /** Пауза после сбоя соединения, растёт до минуты. */
     private const RECONNECT_BASE_SECONDS = 1;
     private const RECONNECT_MAX_SECONDS = 60;
@@ -105,6 +108,11 @@ final class Worker
             // повторять задачу больше незачем.
             if (in_array($outcome, ['delivered', 'refunded', 'noop'], true)) {
                 $this->queue->done($id);
+            } elseif ($outcome === DeliverOrderItem::THROTTLED) {
+                // Места в лимите поставщика не нашлось: работа не выполнялась
+                // и попыткой не считается. Отсрочка короткая — место
+                // освобождается по мере ухода обращений за окно.
+                $this->queue->defer($id, self::THROTTLED_DELAY_SECONDS, 'rate_limited');
             } else {
                 $this->reschedule($job, $outcome);
             }

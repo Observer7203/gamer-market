@@ -146,8 +146,8 @@ final class ReconciliationTest extends TestCase
         $first = $this->heal();
         $second = $this->heal();
 
-        self::assertSame([0, 0, 0, 0, 0], array_values($first));
-        self::assertSame([0, 0, 0, 0, 0], array_values($second));
+        self::assertSame([0, 0, 0, 0, 0, 0, 0], array_values($first));
+        self::assertSame([0, 0, 0, 0, 0, 0, 0], array_values($second));
         self::assertSame(1, $this->rows('deliveries'));
         self::assertSame(4, $this->rows('ledger_entries'));
         self::assertTrue($this->report()['healthy']);
