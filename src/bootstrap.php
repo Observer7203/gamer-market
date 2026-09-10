@@ -5,7 +5,9 @@ declare(strict_types=1);
 use App\Database\Connection;
 use App\Database\Migrator;
 use App\Database\PostgresConnection;
+use App\Services\AcceptProviderCode;
 use App\Services\DeliverOrderItem;
+use App\Services\Discrepancies;
 use App\Services\FinalizeOrder;
 use App\Services\RefundItem;
 use App\Services\HttpProviderClient;
@@ -51,6 +53,8 @@ return (static function (): Container {
         $c->get(Ledger::class),
         $c->get(RefundItem::class),
         $c->get(FinalizeOrder::class),
+        $c->get(AcceptProviderCode::class),
+        $c->get(Discrepancies::class),
         $c->get(Logger::class),
         array_keys($config['provider']['endpoints']),
         $config['provider']['max_attempts'],

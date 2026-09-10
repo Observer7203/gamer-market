@@ -41,6 +41,34 @@ final class ProviderStubController
     }
 
     /**
+     * Что поставщик считает выданным по запросу.
+     *
+     * Отдельный маршрут, потому что это отдельный вопрос: не «выдай», а
+     * «что у тебя записано». После отказа или молчания ответ на выдачу
+     * ничего не доказывает, а состояние поставщика проверяемо.
+     */
+    public function status(Request $request): Response
+    {
+        $requestId = $request->input('request_id');
+
+        if (!is_string($requestId) || $requestId === '') {
+            return Response::error('invalid_request', 'Параметр request_id обязателен', 400);
+        }
+
+        $result = $this->stub->status($request->attribute('provider'), $requestId);
+
+        // Недоступность отдаётся кодом 503, а не телом ответа: для вызывающей
+        // стороны это отсутствие ответа, а не отрицательный ответ.
+        if ($result['status'] === 'unavailable') {
+            return Response::json(['status' => 'unavailable', 'request_id' => $requestId], 503);
+        }
+
+        return Response::json($result['status'] === 'issued'
+            ? ['status' => 'issued', 'request_id' => $requestId, 'code' => $result['code']]
+            : ['status' => 'not_issued', 'request_id' => $requestId]);
+    }
+
+    /**
      * Управление поведением заглушки.
      *
      * Служебный маршрут: позволяет воспроизводить отказы и неответы
@@ -54,6 +82,8 @@ final class ProviderStubController
         $allowed = [
             ProviderStub::RANDOM, ProviderStub::OK, ProviderStub::ERROR,
             ProviderStub::OUT_OF_STOCK, ProviderStub::TIMEOUT, ProviderStub::ISSUE_THEN_TIMEOUT,
+            ProviderStub::DUPLICATE_CODE, ProviderStub::FOREIGN_CODE, ProviderStub::ERROR_BUT_ISSUED,
+            ProviderStub::BLACKOUT,
         ];
 
         if (!in_array($mode, $allowed, true)) {

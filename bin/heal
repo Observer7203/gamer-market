@@ -3,24 +3,32 @@
 
 declare(strict_types=1);
 
+use App\Services\AuditProviderCodes;
 use App\Services\HealStuckOrders;
 use App\Support\Container;
 
 /**
- * Доводка заказов, не завершившихся самостоятельно.
+ * Доводка заказов и сверка с поставщиками.
  *
- * Запускается планировщиком раз в минуту. Все действия идемпотентны,
- * повторный запуск ничего не удваивает.
+ * Запускается планировщиком раз в минуту. Две обязанности разделены между
+ * сервисами: доводка занимается очередью и позициями, сверка — расхождениями
+ * с поставщиками. Здесь они просто вызываются подряд.
+ *
+ * Все действия идемпотентны, повторный запуск ничего не удваивает.
  */
 
 /** @var Container $container */
 $container = require dirname(__DIR__) . '/src/bootstrap.php';
 
 $healed = ($container->get(HealStuckOrders::class))();
+$audited = ($container->get(AuditProviderCodes::class))();
 
 // Молчание при отсутствии работы: планировщик выполняет доводку каждую
-// минуту, и постоянный вывод забивал бы журнал контейнера.
-if (array_sum($healed) === 0 && !in_array('--verbose', $argv, true)) {
+// минуту, и постоянный вывод забивал бы журнал контейнера. Проверенные
+// запросы работой не считаются — они есть почти всегда.
+$worked = array_sum($healed) + $audited['recovered'] + $audited['resolved'];
+
+if ($worked === 0 && !in_array('--verbose', $argv, true)) {
     exit(0);
 }
 
@@ -32,4 +40,12 @@ printf(
     $healed['applied_events'],
     $healed['requeued_items'],
     $healed['finalized_orders'],
+);
+
+printf(
+    "сверка с поставщиками: проверено запросов %d, восстановлено кодов %d, "
+    . "разобрано расхождений %d\n",
+    $audited['checked'],
+    $audited['recovered'],
+    $audited['resolved'],
 );

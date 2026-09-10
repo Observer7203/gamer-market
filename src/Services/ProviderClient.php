@@ -25,4 +25,18 @@ interface ProviderClient
      * @return array{outcome: string, code: ?string, reason: ?string, http: int, latency_ms: int}
      */
     public function issue(string $provider, string $requestId, string $sku, string $orderId): array;
+
+    /**
+     * Что поставщик считает выданным по этому запросу.
+     *
+     * Единственный способ узнать правду после отказа или молчания: ответу
+     * на выдачу верить нельзя, а состояние на стороне поставщика проверяемо.
+     * На этом построен автоматический разбор расхождений.
+     *
+     * Исход unknown означает, что и на этот запрос ответа не было —
+     * состояние по-прежнему неизвестно.
+     *
+     * @return array{outcome: string, code: ?string, reason: ?string}
+     */
+    public function status(string $provider, string $requestId): array;
 }

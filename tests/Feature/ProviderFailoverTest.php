@@ -105,8 +105,10 @@ final class ProviderFailoverTest extends TestCase
 
     public function testОтсутствиеОтветаНеПринимаетсяЗаОтказ(): void
     {
-        // Поставщик выдал код, ответ не дошёл.
-        $this->behavior('a', ProviderStub::ISSUE_THEN_TIMEOUT);
+        // Поставщик выдал код и пропал: ни ответа на выдачу, ни состояния.
+        // Узнать правду не у кого — только в этом случае неопределённость
+        // и остаётся неразрешённой.
+        $this->behavior('a', ProviderStub::BLACKOUT);
         $this->behavior('b', ProviderStub::OK);
 
         $order = $this->deliverPaidOrder();
@@ -128,7 +130,7 @@ final class ProviderFailoverTest extends TestCase
 
     public function testПовторПослеНеответаВозвращаетТотЖеКод(): void
     {
-        $this->behavior('a', ProviderStub::ISSUE_THEN_TIMEOUT);
+        $this->behavior('a', ProviderStub::BLACKOUT);
         $this->behavior('b', ProviderStub::OK);
 
         $order = $this->deliverPaidOrder();
@@ -193,6 +195,6 @@ final class ProviderFailoverTest extends TestCase
 
         // Идентификатор детерминирован: повтор обращается к тому же запросу.
         self::assertCount(1, $requestIds);
-        self::assertSame('req_' . $order['order_id'] . '_1_a', $requestIds[0]);
+        self::assertSame('req_' . $order['order_id'] . '_1_a_g1', $requestIds[0]);
     }
 }

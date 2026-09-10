@@ -32,7 +32,11 @@ return static function (Router $router): void {
     // ради простоты запуска.
     $router->post('/stubs/provider-{provider}/issue', [ProviderStubController::class, 'issue']);
 
+    // Что поставщик считает выданным по запросу: после отказа или молчания
+    // ответ на выдачу ничего не доказывает, а это состояние проверяемо.
+    $router->get('/stubs/provider-{provider}/status', [ProviderStubController::class, 'status']);
+
     // Служебный маршрут: задаёт поведение заглушки для воспроизводимых
-    // сценариев отказа и неответа.
+    // сценариев отказа, неответа и недобросовестности.
     $router->post('/stubs/provider-{provider}/behavior', [ProviderStubController::class, 'behavior']);
 };

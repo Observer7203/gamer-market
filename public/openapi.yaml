@@ -406,6 +406,10 @@ paths:
 
         Именно это делает безопасным повтор после истечения таймаута:
         отсутствие ответа не означает, что код не был выдан.
+
+        Ответу поставщика при этом верить нельзя: в недобросовестных режимах
+        он присылает уже выданный или чужой код. Присланный код становится
+        товаром заказа только после приёмки на нашей стороне.
       parameters:
         - $ref: "#/components/parameters/Provider"
       requestBody:
@@ -418,8 +422,13 @@ paths:
               properties:
                 request_id:
                   type: string
-                  description: Идентификатор запроса, детерминированный для повторов
-                  example: req_ord_01M1V74GDR7FW5KKQYYK30X2RC_a
+                  description: |
+                    Идентификатор запроса вида
+                    `req_<заказ>_<позиция>_<поставщик>_g<поколение>`.
+                    Детерминирован: повтор обращается к тому же запросу.
+                    Поколение растёт только когда присланный код отклонён
+                    приёмкой как чужой.
+                  example: req_ord_01M1V74GDR7FW5KKQYYK30X2RC_1_a_g1
                 sku:
                   type: string
                   example: KEY-GTA5
@@ -433,7 +442,7 @@ paths:
             application/json:
               example:
                 status: ok
-                request_id: req_ord_01M1V74GDR7FW5KKQYYK30X2RC_a
+                request_id: req_ord_01M1V74GDR7FW5KKQYYK30X2RC_1_a_g1
                 code: a-HHW6-4RX2-DX62
         "400":
           $ref: "#/components/responses/InvalidRequest"
@@ -452,14 +461,61 @@ paths:
                 status: error
                 reason: provider_unavailable
 
+  /stubs/provider-{provider}/status:
+    get:
+      operationId: stubStatus
+      tags: [Заглушки поставщиков]
+      summary: Что поставщик считает выданным
+      description: |
+        Отдельный вопрос: не «выдай», а «что у тебя записано».
+
+        После отказа или молчания ответ на выдачу ничего не доказывает —
+        поставщик мог занять код и ответить ошибкой. Состояние на его стороне
+        проверяемо, и на нём построен автоматический разбор расхождений.
+
+        Ответ 503 означает, что состояние недоступно. Для вызывающей стороны
+        это отсутствие ответа, а не отрицательный ответ: позиция остаётся
+        неразрешённой, и возврат денег из этого состояния запрещён.
+      parameters:
+        - $ref: "#/components/parameters/Provider"
+        - name: request_id
+          in: query
+          required: true
+          schema:
+            type: string
+          example: req_ord_01M1V74GDR7FW5KKQYYK30X2RC_1_a_g1
+      responses:
+        "200":
+          description: Состояние известно
+          content:
+            application/json:
+              examples:
+                выдал:
+                  value:
+                    status: issued
+                    request_id: req_ord_01M1V74GDR7FW5KKQYYK30X2RC_1_a_g1
+                    code: a-HHW6-4RX2-DX62
+                не выдавал:
+                  value:
+                    status: not_issued
+                    request_id: req_ord_01M1V74GDR7FW5KKQYYK30X2RC_1_a_g1
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "503":
+          description: Состояние недоступно
+          content:
+            application/json:
+              example:
+                status: unavailable
+
   /stubs/provider-{provider}/behavior:
     post:
       operationId: stubBehavior
       tags: [Заглушки поставщиков]
       summary: Управление поведением заглушки
       description: |
-        Служебный маршрут: позволяет воспроизводить отказы и отсутствие
-        ответа детерминированно, без правки кода и перезапуска.
+        Служебный маршрут: позволяет воспроизводить отказы, отсутствие ответа
+        и недобросовестность детерминированно, без правки кода и перезапуска.
 
         Режим `random` соответствует условию «случайно падает и отвечает
         с задержкой». Половина случаев отсутствия ответа приходится
@@ -475,7 +531,8 @@ paths:
               properties:
                 mode:
                   type: string
-                  enum: [random, ok, error, out_of_stock, timeout, issue_then_timeout]
+                  enum: [random, ok, error, out_of_stock, timeout, issue_then_timeout,
+                         duplicate_code, foreign_code, error_but_issued, blackout]
                   default: random
                   description: |
                     * `ok` — всегда выдаёт код
@@ -484,6 +541,15 @@ paths:
                     * `timeout` — молчит, кода не выдаёт
                     * `issue_then_timeout` — выдаёт код и молчит
                     * `random` — разыгрывает исход по заданным долям
+
+                    Недобросовестные режимы:
+
+                    * `duplicate_code` — отдаёт код, уже выданный
+                      по другому запросу; склад не расходуется
+                    * `foreign_code` — отдаёт код другого поставщика
+                    * `error_but_issued` — занимает код и отвечает отказом
+                    * `blackout` — занимает код и не отвечает ни на выдачу,
+                      ни на запрос состояния
                 fail_rate:
                   type: number
                   format: float
@@ -507,6 +573,12 @@ paths:
                 value: {mode: error}
               выдал и замолчал:
                 value: {mode: issue_then_timeout, hang_seconds: 4}
+              выдаёт один код всем:
+                value: {mode: duplicate_code}
+              лжёт об отказе:
+                value: {mode: error_but_issued}
+              пропал целиком:
+                value: {mode: blackout, hang_seconds: 4}
               случайные сбои:
                 value: {mode: random, fail_rate: 0.3, timeout_rate: 0.3, hang_seconds: 3}
       responses:

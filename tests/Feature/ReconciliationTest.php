@@ -156,7 +156,7 @@ final class ReconciliationTest extends TestCase
     public function testВыдачаБезОтветаПопадаетВОтчёт(): void
     {
         $this->container->get(ProviderStub::class)
-            ->configure('a', ProviderStub::ISSUE_THEN_TIMEOUT, 0.0, 0.0, 1);
+            ->configure('a', ProviderStub::BLACKOUT, 0.0, 0.0, 1);
 
         $order = $this->createOrder();
         $this->request('POST', '/api/webhooks/payment', $this->paymentEvent($order['order_id']));

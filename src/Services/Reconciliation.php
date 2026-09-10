@@ -30,6 +30,7 @@ final class Reconciliation
     public function __construct(
         private readonly Connection $db,
         private readonly Ledger $ledger,
+        private readonly Discrepancies $discrepancies,
     ) {
     }
 
@@ -44,10 +45,13 @@ final class Reconciliation
         $imbalanced       = $this->ledger->imbalanced();
         $unsettled        = $this->ledger->unsettledOrders();
         $money            = $this->money();
+        $openDiscrepancies = $this->discrepancies->open();
+        $unacceptedCodes  = $this->unacceptedCodes();
 
         $problems = count($paidNotDelivered) + count($deliveredNotPaid)
             + count($stuckJobs) + count($unresolved)
             + count($unappliedEvents) + count($imbalanced) + count($unsettled)
+            + count($openDiscrepancies) + count($unacceptedCodes)
             + ($money['balanced'] ? 0 : 1);
 
         return [
@@ -68,7 +72,11 @@ final class Reconciliation
                 'unapplied_events'      => count($unappliedEvents),
                 'ledger_imbalanced'     => count($imbalanced),
                 'unsettled_orders'      => count($unsettled),
+                'open_discrepancies'    => count($openDiscrepancies),
+                'unaccepted_codes'      => count($unacceptedCodes),
             ],
+
+            'discrepancies' => $this->discrepancies->summary(),
 
             'money'  => $money,
             'ledger' => ['balances' => $this->ledger->balances()],
@@ -80,6 +88,8 @@ final class Reconciliation
             'unapplied_events'      => $unappliedEvents,
             'ledger_imbalanced'     => $imbalanced,
             'unsettled_orders'      => $unsettled,
+            'open_discrepancies'    => $openDiscrepancies,
+            'unaccepted_codes'      => $unacceptedCodes,
         ];
     }
 
@@ -193,6 +203,30 @@ final class Reconciliation
         return $this->db->select(
             "SELECT order_id, position, unresolved_provider, request_id, attempts, last_error
                FROM deliveries WHERE status = 'unresolved' ORDER BY order_id, position"
+        );
+    }
+
+    /**
+     * Коды, ушедшие покупателю в обход приёмки.
+     *
+     * В исправной системе список пуст: код попадает в выдачу только после
+     * того, как приёмка признала его нашим. Непустой список означает путь,
+     * которым ответ поставщика был принят на веру.
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function unacceptedCodes(): array
+    {
+        return $this->db->select(
+            "SELECT d.order_id, d.position, d.provider, d.request_id, d.code
+               FROM deliveries d
+              WHERE d.status = 'delivered' AND d.code IS NOT NULL
+                AND NOT EXISTS (
+                    SELECT 1 FROM issued_codes c
+                     WHERE c.code = d.code
+                       AND c.order_id = d.order_id AND c.position = d.position
+                )
+              ORDER BY d.order_id, d.position"
         );
     }
 

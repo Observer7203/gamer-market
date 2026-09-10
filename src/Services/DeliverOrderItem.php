@@ -33,6 +33,10 @@ use App\Support\Logger;
  *   - переключение на резервного поставщика допустимо только после явного
  *     ответа предыдущего;
  *   - возврат денег из неопределённости запрещён: сначала она разрешается.
+ *
+ * Второе правило: ответу поставщика верить нельзя. Присланный код проходит
+ * приёмку и становится нашим только там; отказ проверяется запросом статуса,
+ * потому что поставщик мог выдать код и ответить ошибкой.
  */
 final class DeliverOrderItem
 {
@@ -43,6 +47,8 @@ final class DeliverOrderItem
         private readonly Ledger $ledger,
         private readonly RefundItem $refundItem,
         private readonly FinalizeOrder $finalizeOrder,
+        private readonly AcceptProviderCode $acceptCode,
+        private readonly Discrepancies $discrepancies,
         private readonly Logger $logger,
         private readonly array $providers = ['a', 'b'],
         private readonly int $maxAttempts = 3,
@@ -66,7 +72,12 @@ final class DeliverOrderItem
             return 'noop';
         }
 
-        $result = $this->obtainCode($orderId, $position, (string) $claim['sku']);
+        $result = $this->obtainCode(
+            $orderId,
+            $position,
+            (string) $claim['sku'],
+            (int) $claim['generation'],
+        );
         $outcome = $this->store($orderId, $position, $result);
 
         if ($outcome === 'delivered') {
@@ -96,7 +107,7 @@ final class DeliverOrderItem
      * Одно условное обновление отвечает сразу на три вопроса: не занята ли
      * позиция другим исполнителем, оплачен ли заказ и не завершена ли она уже.
      *
-     * @return array{sku: string, attempts: int}|null
+     * @return array{sku: string, attempts: int, generation: int}|null
      */
     private function claim(string $orderId, int $position): ?array
     {
@@ -117,7 +128,7 @@ final class DeliverOrderItem
                     AND d.status <> ?
                     AND i.status IN (?, ?, ?, ?)
                     AND o.status IN (?, ?)
-              RETURNING i.sku, d.attempts',
+              RETURNING i.sku, d.attempts, d.generation',
                 [
                     Delivery::IN_FLIGHT, $orderId, $position,
                     Delivery::IN_FLIGHT,
@@ -140,7 +151,11 @@ final class DeliverOrderItem
                 [Order::DELIVERING, $orderId, Order::PAID]
             );
 
-            return ['sku' => (string) $claimed['sku'], 'attempts' => (int) $claimed['attempts']];
+            return [
+                'sku'        => (string) $claimed['sku'],
+                'attempts'   => (int) $claimed['attempts'],
+                'generation' => (int) $claimed['generation'],
+            ];
         });
     }
 
@@ -149,35 +164,58 @@ final class DeliverOrderItem
      *
      * @return array{outcome: string, provider: string, request_id: string, code: ?string, reason: ?string}
      */
-    private function obtainCode(string $orderId, int $position, string $sku): array
+    private function obtainCode(string $orderId, int $position, string $sku, int $generation): array
     {
+        $rejected = false;
         $last = null;
 
         foreach ($this->providers as $provider) {
-            // request_id детерминирован и выводится из тройки
-            // «заказ — позиция — поставщик»: повтор обращается
-            // к тому же запросу и получает тот же код.
-            $requestId = sprintf('req_%s_%d_%s', $orderId, $position, $provider);
+            $requestId = OrderItem::requestIdFor($orderId, $position, $provider, $generation);
 
             for ($attempt = 1; $attempt <= $this->maxAttempts; $attempt++) {
                 $response = $this->provider->issue($provider, $requestId, $sku, $orderId);
-                $this->recordAttempt($orderId, $position, $provider, $requestId, $attempt, $response);
-
-                $last = [
-                    'outcome'    => $response['outcome'],
-                    'provider'   => $provider,
-                    'request_id' => $requestId,
-                    'code'       => $response['code'],
-                    'reason'     => $response['reason'],
-                ];
+                $this->recordAttempt($orderId, $position, $provider, $requestId, $attempt, $generation, $response);
 
                 if ($response['outcome'] === ProviderClient::OK) {
-                    return $last;
+                    $accepted = ($this->acceptCode)(
+                        $provider,
+                        $requestId,
+                        $orderId,
+                        $position,
+                        (string) $response['code'],
+                    );
+
+                    // Код принадлежит другой позиции. Тот же запрос будет
+                    // возвращать его и дальше, поэтому нужен новый запрос:
+                    // поколение растёт, и поставщик получает шанс исправиться.
+                    if ($accepted['outcome'] === AcceptProviderCode::DUPLICATE) {
+                        $rejected = true;
+                        $generation = $this->nextGeneration($orderId, $position);
+                        $requestId = OrderItem::requestIdFor($orderId, $position, $provider, $generation);
+
+                        continue;
+                    }
+
+                    $rejected = false;
+
+                    return ['outcome' => ProviderClient::OK, 'provider' => $provider,
+                            'request_id' => $requestId, 'code' => $accepted['code'], 'reason' => null];
                 }
 
-                // Явный отказ: состояние поставщика известно, выдачи не было.
-                // Дальнейшие повторы к нему бессмысленны, переключаемся.
+                // Явный отказ. Верить ему нельзя: поставщик мог выдать код.
                 if ($response['outcome'] === ProviderClient::ERROR) {
+                    $verified = $this->verify($provider, $requestId, $orderId, $position, (string) $response['reason']);
+
+                    if ($verified !== null) {
+                        return $verified;
+                    }
+
+                    // Причина отказа сохраняется: пустой остаток — состояние
+                    // восстановимое, и позиция должна знать об этом, даже если
+                    // так ответили все поставщики.
+                    $last = ['outcome' => ProviderClient::ERROR, 'provider' => $provider,
+                             'request_id' => $requestId, 'code' => null, 'reason' => $response['reason']];
+
                     continue 2;
                 }
 
@@ -188,9 +226,32 @@ final class DeliverOrderItem
                 }
             }
 
-            // Повторы исчерпаны, ответа так и не было. Переключение
-            // на резервного поставщика запрещено: неизвестно, выдал ли код
-            // текущий.
+            // Поставщик отвечал, но каждый раз чужим кодом. Состояние его
+            // известно: выдачи, принадлежащей нам, не было. Значит переключение
+            // на резервного допустимо — в отличие от молчания.
+            if ($rejected) {
+                $this->logger->error('delivery_codes_rejected', [
+                    'channel'    => 'delivery',
+                    'order_id'   => $orderId,
+                    'position'   => $position,
+                    'provider'   => $provider,
+                    'attempts'   => $this->maxAttempts,
+                ]);
+
+                continue;
+            }
+
+            // Повторы исчерпаны, ответа так и не было. Прежде чем оставлять
+            // позицию в неопределённости, спрашиваем поставщика напрямую:
+            // выдача могла состояться, а ответ не дойти.
+            $verified = $this->verify($provider, $requestId, $orderId, $position, 'timeout');
+
+            if ($verified !== null) {
+                return $verified;
+            }
+
+            // Переключение на резервного поставщика запрещено: неизвестно,
+            // выдал ли код текущий.
             $this->logger->error('delivery_unresolved', [
                 'channel'    => 'delivery',
                 'order_id'   => $orderId,
@@ -204,8 +265,76 @@ final class DeliverOrderItem
                     'request_id' => $requestId, 'code' => null, 'reason' => 'timeout'];
         }
 
+        if ($rejected) {
+            return ['outcome' => ProviderClient::ERROR, 'provider' => '', 'request_id' => '',
+                    'code' => null, 'reason' => 'code_rejected'];
+        }
+
         return $last ?? ['outcome' => ProviderClient::ERROR, 'provider' => '',
                          'request_id' => '', 'code' => null, 'reason' => 'no_providers'];
+    }
+
+    /**
+     * Проверка отрицательного ответа запросом состояния.
+     *
+     * Поставщик мог выдать код и ответить отказом либо промолчать. Отказ —
+     * заявление, состояние на его стороне — факт, и расходятся они регулярно.
+     *
+     * @return array{outcome: string, provider: string, request_id: string,
+     *               code: ?string, reason: ?string}|null null, если выдачи не было
+     */
+    private function verify(
+        string $provider,
+        string $requestId,
+        string $orderId,
+        int $position,
+        string $reason
+    ): ?array {
+        $status = $this->provider->status($provider, $requestId);
+
+        if ($status['outcome'] !== ProviderClient::OK || $status['code'] === null) {
+            return null;
+        }
+
+        $accepted = ($this->acceptCode)($provider, $requestId, $orderId, $position, (string) $status['code']);
+
+        if ($accepted['outcome'] === AcceptProviderCode::DUPLICATE) {
+            return null;
+        }
+
+        // Ответ поставщика разошёлся с действительностью. Расхождение
+        // записывается и тут же закрывается: разбор произошёл сам.
+        $this->discrepancies->record(
+            Discrepancies::SILENT_ISSUE,
+            $provider,
+            $requestId,
+            $orderId,
+            $position,
+            $accepted['code'],
+            sprintf('ответ %s, код выдан', $reason),
+        );
+        $this->discrepancies->resolve(
+            Discrepancies::SILENT_ISSUE,
+            $provider,
+            $requestId,
+            'код принят по состоянию поставщика',
+        );
+
+        return ['outcome' => ProviderClient::OK, 'provider' => $provider,
+                'request_id' => $requestId, 'code' => $accepted['code'], 'reason' => null];
+    }
+
+    /** Следующее поколение запроса: прежний запрос отравлен чужим кодом. */
+    private function nextGeneration(string $orderId, int $position): int
+    {
+        $row = $this->db->selectOne(
+            'UPDATE deliveries SET generation = generation + 1
+              WHERE order_id = ? AND position = ?
+          RETURNING generation',
+            [$orderId, $position]
+        );
+
+        return (int) ($row['generation'] ?? 1);
     }
 
     /**
@@ -310,14 +439,16 @@ final class DeliverOrderItem
         string $provider,
         string $requestId,
         int $attempt,
+        int $generation,
         array $response
     ): void {
         $this->db->execute(
             'INSERT INTO delivery_attempts
-                    (order_id, position, provider, request_id, attempt_no, outcome, reason, http_code, latency_ms)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                    (order_id, position, provider, request_id, attempt_no, generation,
+                     outcome, reason, http_code, latency_ms)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
             [
-                $orderId, $position, $provider, $requestId, $attempt,
+                $orderId, $position, $provider, $requestId, $attempt, $generation,
                 $response['outcome'], $response['reason'],
                 $response['http'] ?? null, $response['latency_ms'] ?? null,
             ]

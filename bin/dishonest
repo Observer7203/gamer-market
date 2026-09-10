@@ -1,0 +1,428 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+use App\Database\Connection;
+use App\Models\OrderItem;
+use App\Services\AuditProviderCodes;
+use App\Services\DeliverOrderItem;
+use App\Services\Discrepancies;
+use App\Support\Container;
+
+/**
+ * Воспроизводимая проверка поведения при недобросовестном поставщике.
+ *
+ * Поставщик может втихую выдать один код дважды, прислать чужой код или
+ * ответить ошибкой, выдав код на самом деле. Проверяется, что ни в одном
+ * случае код не уходит двум покупателям, покупатель получает ровно один
+ * рабочий код, а расхождения разбираются без участия человека.
+ *
+ * Ненулевой код возврата означает нарушение.
+ *
+ *   php bin/dishonest
+ *   php bin/dishonest --scenario=silent
+ *   php bin/dishonest --repeat=3
+ */
+
+/** @var Container $container */
+$container = require dirname(__DIR__) . '/src/bootstrap.php';
+$db = $container->get(Connection::class);
+
+$options = getopt('', ['scenario::', 'repeat::', 'url::']);
+$repeat  = max(1, (int) ($options['repeat'] ?? 1));
+$base    = rtrim($options['url'] ?? (getenv('APP_URL') ?: 'http://nginx'), '/');
+$only    = $options['scenario'] ?? null;
+
+const SKU = 'KEY-DISHONEST';
+
+$scenarios = [
+    'duplicate' => ['поставщик прислал уже выданный код', 'duplicateCode'],
+    'foreign'   => ['поставщик прислал чужой код', 'foreignCode'],
+    'silent'    => ['ответил ошибкой, но код выдал', 'silentIssue'],
+    'audit'     => ['обрыв после выдачи, сверка разбирает сама', 'audit'],
+];
+
+printf("Проверка недобросовестного поставщика\n  повторов: %d\n\n", $repeat);
+
+$failed = 0;
+$checks = 0;
+
+foreach ($scenarios as $name => [$title, $handler]) {
+    if ($only !== null && $only !== $name) {
+        continue;
+    }
+
+    printf("── %s\n", $title);
+
+    for ($run = 1; $run <= $repeat; $run++) {
+        prepare($db, $container);
+
+        $result = $handler($container, $db, $base);
+        $checks += count($result['checks']);
+        $broken = array_filter($result['checks'], static fn (bool $ok): bool => !$ok);
+
+        if ($broken !== []) {
+            $failed++;
+            printf("  %2d/%d  НАРУШЕНО\n", $run, $repeat);
+            foreach (array_keys($broken) as $check) {
+                printf("         %s\n", $check);
+            }
+            printf("         факт: %s\n", json_encode($result['facts'], JSON_UNESCAPED_UNICODE));
+            continue;
+        }
+
+        printf("  %2d/%d  ок   %s\n", $run, $repeat, json_encode($result['facts'], JSON_UNESCAPED_UNICODE));
+    }
+
+    echo "\n";
+}
+
+printf("Проверок: %d, нарушений: %d\n", $checks, $failed);
+exit($failed === 0 ? 0 : 1);
+
+
+// ── сценарии ────────────────────────────────────────────────────────────────
+
+/**
+ * Поставщик отдаёт код, который уже выдал по другому запросу.
+ *
+ * @return array{checks: array<string, bool>, facts: array<string, mixed>}
+ */
+function duplicateCode(Container $c, Connection $db, string $base): array
+{
+    behavior($base, 'a', 'ok');
+    behavior($base, 'b', 'error');
+
+    $first = deliveredOrder($c, $base);
+
+    // Теперь A присылает всем тот же код, а B работает как резервный.
+    behavior($base, 'a', 'duplicate_code');
+    behavior($base, 'b', 'ok');
+
+    $second = deliveredOrder($c, $base);
+
+    $firstCode = codeOf($db, $first);
+    $secondCode = codeOf($db, $second);
+
+    return [
+        'facts' => [
+            'первый'     => $firstCode,
+            'второй'     => $secondCode,
+            'поставщик'  => providerOf($db, $second),
+            'расхождения' => discrepancyKinds($db, $second),
+        ],
+        'checks' => [
+            'оба заказа выданы'              => $firstCode !== null && $secondCode !== null,
+            'коды разные'                    => $firstCode !== $secondCode,
+            'дубль не принят'                => ownerCount($db, (string) $firstCode) === 1,
+            'выдал резервный поставщик'      => providerOf($db, $second) === 'b',
+            'расхождение зафиксировано'      => in_array('duplicate_code', discrepancyKinds($db, $second), true),
+        ],
+    ];
+}
+
+/**
+ * Поставщик отдаёт код, которым не распоряжается, — уже принятый другим заказом.
+ *
+ * @return array{checks: array<string, bool>, facts: array<string, mixed>}
+ */
+function foreignCode(Container $c, Connection $db, string $base): array
+{
+    // Первый заказ обслуживает B: его код становится принятым.
+    behavior($base, 'a', 'error');
+    behavior($base, 'b', 'ok');
+
+    $first = deliveredOrder($c, $base);
+
+    // Теперь A отдаёт чужой код — тот самый, что уже принадлежит первому заказу.
+    behavior($base, 'a', 'foreign_code');
+
+    $second = deliveredOrder($c, $base);
+
+    $firstCode = codeOf($db, $first);
+    $secondCode = codeOf($db, $second);
+
+    return [
+        'facts' => [
+            'первый'      => $firstCode,
+            'второй'      => $secondCode,
+            'поставщик'   => providerOf($db, $second),
+            'расхождения' => discrepancyKinds($db, $second),
+        ],
+        'checks' => [
+            'оба заказа выданы'         => $firstCode !== null && $secondCode !== null,
+            'чужой код не принят'       => $firstCode !== $secondCode,
+            'код остался у первого'     => ownerOf($db, (string) $firstCode) === $first,
+            'расхождение зафиксировано' => in_array('duplicate_code', discrepancyKinds($db, $second), true),
+        ],
+    ];
+}
+
+/**
+ * Поставщик отвечает ошибкой, хотя код выдал.
+ *
+ * @return array{checks: array<string, bool>, facts: array<string, mixed>}
+ */
+function silentIssue(Container $c, Connection $db, string $base): array
+{
+    behavior($base, 'a', 'error_but_issued');
+    behavior($base, 'b', 'error');
+
+    $orderId = deliveredOrder($c, $base);
+    $code = codeOf($db, $orderId);
+
+    // Повтор выдачи по уже завершённой позиции.
+    ($c->get(DeliverOrderItem::class))($orderId, 1);
+
+    return [
+        'facts' => [
+            'код'         => $code,
+            'поставщик'   => providerOf($db, $orderId),
+            'занято_у_A'  => claimedByProvider($db, $orderId, 'a'),
+            'расхождения' => discrepancyKinds($db, $orderId),
+        ],
+        'checks' => [
+            'заказ выдан'                  => $code !== null,
+            'выдал тот же поставщик'       => providerOf($db, $orderId) === 'a',
+            'у поставщика занят один код'  => claimedByProvider($db, $orderId, 'a') === 1,
+            'принят ровно один код'        => acceptedCount($db, $orderId) === 1,
+            'расхождение зафиксировано'    => in_array('silent_issue', discrepancyKinds($db, $orderId), true),
+            'расхождение разобрано'        => openDiscrepancies($db, $orderId) === 0,
+        ],
+    ];
+}
+
+/**
+ * Обрыв сразу после того, как поставщик занял код.
+ *
+ * У поставщика код числится выданным, у нас о нём ничего нет. Сверка обязана
+ * найти расхождение и принять код без участия человека.
+ *
+ * @return array{checks: array<string, bool>, facts: array<string, mixed>}
+ */
+function audit(Container $c, Connection $db, string $base): array
+{
+    behavior($base, 'a', 'ok');
+    behavior($base, 'b', 'error');
+
+    $orderId = paidOrder($base);
+    $requestId = OrderItem::requestIdFor($orderId, 1, 'a');
+
+    // Поставщик занял код по нашему запросу, ответ не дошёл, процесс погиб.
+    $db->execute(
+        'UPDATE provider_stock
+            SET request_id = ?, issued_at = now()
+          WHERE id = (SELECT id FROM provider_stock
+                       WHERE provider = ? AND sku = ? AND request_id IS NULL
+                       ORDER BY id LIMIT 1)',
+        [$requestId, 'a', SKU]
+    );
+    $db->execute(
+        "INSERT INTO delivery_attempts
+                (order_id, position, provider, request_id, attempt_no, generation, outcome, reason)
+         VALUES (?, 1, 'a', ?, 1, 1, 'unknown', 'timeout')",
+        [$orderId, $requestId]
+    );
+    $db->execute(
+        "INSERT INTO deliveries (order_id, position, status, provider, request_id, unresolved_provider)
+              VALUES (?, 1, 'unresolved', 'a', ?, 'a')
+         ON CONFLICT (order_id, position) DO UPDATE
+            SET status = 'unresolved', request_id = excluded.request_id",
+        [$orderId, $requestId]
+    );
+    $db->execute("UPDATE order_items SET status = 'unresolved' WHERE order_id = ? AND position = 1", [$orderId]);
+    $db->execute("DELETE FROM jobs WHERE payload->>'order_id' = ?", [$orderId]);
+
+    $claimed = (string) $db->selectOne(
+        'SELECT code FROM provider_stock WHERE request_id = ?',
+        [$requestId]
+    )['code'];
+
+    $audited = ($c->get(AuditProviderCodes::class))();
+    drainQueue($c);
+
+    return [
+        'facts' => [
+            'занятый_код' => $claimed,
+            'выдан'       => codeOf($db, $orderId),
+            'сверка'      => $audited,
+            'расхождения' => discrepancyKinds($db, $orderId),
+        ],
+        'checks' => [
+            'сверка нашла расхождение'  => $audited['recovered'] > 0,
+            'выдан ранее занятый код'   => codeOf($db, $orderId) === $claimed,
+            'второго кода не занято'    => claimedByProvider($db, $orderId, 'a') === 1,
+            'расхождение зафиксировано' => in_array('silent_issue', discrepancyKinds($db, $orderId), true),
+            'расхождение разобрано'     => openDiscrepancies($db, $orderId) === 0,
+        ],
+    ];
+}
+
+
+// ── вспомогательное ─────────────────────────────────────────────────────────
+
+/** Заказ из одной позиции, оплаченный и доведённый до завершения. */
+function deliveredOrder(Container $c, string $base): string
+{
+    $orderId = paidOrder($base);
+    drainQueue($c);
+
+    $deliver = $c->get(DeliverOrderItem::class);
+    $db = $c->get(Connection::class);
+
+    for ($attempt = 0; $attempt < 10; $attempt++) {
+        $status = (string) $db->selectOne(
+            'SELECT status FROM order_items WHERE order_id = ? AND position = 1',
+            [$orderId]
+        )['status'];
+
+        if (in_array($status, ['delivered', 'refunded'], true)) {
+            break;
+        }
+
+        $deliver($orderId, 1);
+    }
+
+    return $orderId;
+}
+
+function paidOrder(string $base): string
+{
+    $body = post($base . '/api/orders', ['sku' => SKU]);
+    $orderId = (string) ($body['order_id'] ?? '');
+
+    if ($orderId === '') {
+        fwrite(STDERR, 'Не удалось создать заказ: ' . json_encode($body, JSON_UNESCAPED_UNICODE) . "\n");
+        exit(2);
+    }
+
+    post($base . '/api/webhooks/payment', [
+        'event_id'   => 'evt_' . bin2hex(random_bytes(6)),
+        'order_id'   => $orderId,
+        'status'     => 'paid',
+        'amount'     => 1990,
+        'currency'   => 'RUB',
+        'created_at' => gmdate('Y-m-d\TH:i:s\Z'),
+    ]);
+
+    return $orderId;
+}
+
+function codeOf(Connection $db, string $orderId): ?string
+{
+    $row = $db->selectOne(
+        "SELECT code FROM deliveries WHERE order_id = ? AND position = 1 AND status = 'delivered'",
+        [$orderId]
+    );
+
+    return $row === null ? null : (string) $row['code'];
+}
+
+function providerOf(Connection $db, string $orderId): ?string
+{
+    $row = $db->selectOne('SELECT provider FROM deliveries WHERE order_id = ? AND position = 1', [$orderId]);
+
+    return $row === null ? null : (string) $row['provider'];
+}
+
+/** Сколько позиций владеет этим кодом. Больше одной — нарушение. */
+function ownerCount(Connection $db, string $code): int
+{
+    return count($db->select('SELECT 1 FROM issued_codes WHERE code = ?', [$code]));
+}
+
+function ownerOf(Connection $db, string $code): ?string
+{
+    $row = $db->selectOne('SELECT order_id FROM issued_codes WHERE code = ?', [$code]);
+
+    return $row === null ? null : (string) $row['order_id'];
+}
+
+function acceptedCount(Connection $db, string $orderId): int
+{
+    return count($db->select('SELECT 1 FROM issued_codes WHERE order_id = ?', [$orderId]));
+}
+
+/** Сколько кодов поставщик занял под запросы этого заказа. */
+function claimedByProvider(Connection $db, string $orderId, string $provider): int
+{
+    return count($db->select(
+        'SELECT 1 FROM provider_stock WHERE provider = ? AND request_id LIKE ?',
+        [$provider, '%' . $orderId . '%']
+    ));
+}
+
+/** @return list<string> */
+function discrepancyKinds(Connection $db, string $orderId): array
+{
+    return array_values(array_unique(array_map(
+        static fn (array $row): string => (string) $row['kind'],
+        $db->select('SELECT kind FROM provider_discrepancies WHERE order_id = ?', [$orderId])
+    )));
+}
+
+function openDiscrepancies(Connection $db, string $orderId): int
+{
+    return count($db->select(
+        'SELECT 1 FROM provider_discrepancies WHERE order_id = ? AND resolved_at IS NULL',
+        [$orderId]
+    ));
+}
+
+/** Товар со своим складом: сценарии не должны зависеть от остальных данных. */
+function prepare(Connection $db, Container $c): void
+{
+    $db->execute(
+        "INSERT INTO products (sku, name, type, price_minor, currency)
+              VALUES (?, ?, 'key', 199000, 'RUB')
+         ON CONFLICT (sku) DO UPDATE SET is_active = true",
+        [SKU, SKU]
+    );
+
+    foreach (['a', 'b'] as $provider) {
+        $available = count($db->select(
+            'SELECT 1 FROM provider_stock WHERE provider = ? AND sku = ? AND request_id IS NULL',
+            [$provider, SKU]
+        ));
+
+        for ($i = $available; $i < 10; $i++) {
+            $db->execute(
+                'INSERT INTO provider_stock (provider, sku, code) VALUES (?, ?, ?)
+                 ON CONFLICT DO NOTHING',
+                [$provider, SKU, strtoupper($provider) . '-' . bin2hex(random_bytes(5))]
+            );
+        }
+    }
+}
+
+function behavior(string $base, string $provider, string $mode): void
+{
+    post($base . "/stubs/provider-$provider/behavior", ['mode' => $mode, 'hang_seconds' => 1]);
+}
+
+/** @param array<string, mixed> $payload @return array<string, mixed> */
+function post(string $url, array $payload): array
+{
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_POST           => true,
+        CURLOPT_POSTFIELDS     => json_encode($payload, JSON_UNESCAPED_UNICODE),
+        CURLOPT_HTTPHEADER     => ['Content-Type: application/json'],
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT        => 30,
+    ]);
+    $body = json_decode((string) curl_exec($ch), true);
+    curl_close($ch);
+
+    return is_array($body) ? $body : [];
+}
+
+function drainQueue(Container $c): void
+{
+    $worker = $c->get(App\Queue\Worker::class);
+
+    for ($i = 0; $i < 200 && $worker->tick(); $i++) {
+        // задачи обрабатываются по одной
+    }
+}

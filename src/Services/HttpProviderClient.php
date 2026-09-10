@@ -81,6 +81,46 @@ final class HttpProviderClient implements ProviderClient
         return $result;
     }
 
+    public function status(string $provider, string $requestId): array
+    {
+        $ch = curl_init(($this->endpoints[$provider] ?? '') . '/status?request_id=' . urlencode($requestId));
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER    => true,
+            CURLOPT_CONNECTTIMEOUT_MS => (int) ($this->connectTimeout * 1000),
+            CURLOPT_TIMEOUT_MS        => (int) ($this->timeout * 1000),
+        ]);
+
+        $raw = curl_exec($ch);
+        $errno = curl_errno($ch);
+        $http = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+        curl_close($ch);
+
+        if ($errno !== 0) {
+            return ['outcome' => self::UNKNOWN, 'code' => null, 'reason' => 'status_unavailable'];
+        }
+
+        $decoded = json_decode((string) $raw, true);
+
+        // Недоступность состояния — не отрицательный ответ: правду узнать
+        // не удалось, и неопределённость остаётся неопределённостью.
+        if ($http !== 200 || !is_array($decoded)) {
+            return ['outcome' => self::UNKNOWN, 'code' => null, 'reason' => 'status_unavailable'];
+        }
+
+        $issued = ($decoded['status'] ?? null) === 'issued';
+
+        $this->logger->info('provider_status', [
+            'channel'    => 'delivery',
+            'provider'   => $provider,
+            'request_id' => $requestId,
+            'issued'     => $issued,
+        ]);
+
+        return $issued
+            ? ['outcome' => self::OK, 'code' => (string) $decoded['code'], 'reason' => null]
+            : ['outcome' => self::ERROR, 'code' => null, 'reason' => 'not_issued'];
+    }
+
     /** @return array{outcome: string, code: ?string, reason: ?string} */
     private function parse(string $raw, int $http): array
     {

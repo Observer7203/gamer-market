@@ -94,7 +94,7 @@ final class OrderItemTest extends TestCase
         $first  = $this->item(['position' => 1])->requestId('a');
         $second = $this->item(['position' => 2])->requestId('a');
 
-        self::assertSame('req_ord_TEST_1_a', $first);
+        self::assertSame('req_ord_TEST_1_a_g1', $first);
         self::assertNotSame($first, $second, 'соседние позиции не делят один запрос');
         self::assertNotSame($first, $this->item(['position' => 1])->requestId('b'));
 

@@ -43,4 +43,15 @@ final class LocalProviderClient implements ProviderClient
             'latency_ms' => 0,
         ];
     }
+
+    public function status(string $provider, string $requestId): array
+    {
+        $result = $this->stub->status($provider, $requestId);
+
+        return match ($result['status']) {
+            'issued'      => ['outcome' => self::OK, 'code' => $result['code'], 'reason' => null],
+            'unavailable' => ['outcome' => self::UNKNOWN, 'code' => null, 'reason' => 'status_unavailable'],
+            default       => ['outcome' => self::ERROR, 'code' => null, 'reason' => 'not_issued'],
+        };
+    }
 }

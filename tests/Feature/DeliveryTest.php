@@ -144,7 +144,7 @@ final class DeliveryTest extends TestCase
 
         self::assertTrue($delivery->isDelivered());
         self::assertSame('a', $delivery->provider);
-        self::assertSame('req_' . $order['order_id'] . '_1_a', $delivery->requestId);
+        self::assertSame('req_' . $order['order_id'] . '_1_a_g1', $delivery->requestId);
         self::assertSame(1, $delivery->attempts);
         self::assertSame([1 => OrderItem::DELIVERED], $this->itemStatuses($order['order_id']));
     }

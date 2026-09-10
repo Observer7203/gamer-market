@@ -213,7 +213,7 @@ final class PartialOrderTest extends TestCase
     public function testВозвратИзНеопределённостиЗапрещён(): void
     {
         $this->container->get(\App\Services\ProviderStub::class)
-            ->configure('a', \App\Services\ProviderStub::ISSUE_THEN_TIMEOUT, 0.0, 0.0, 1);
+            ->configure('a', \App\Services\ProviderStub::BLACKOUT, 0.0, 0.0, 1);
 
         $order = $this->createOrder();
         $orderId = $order['order_id'];

@@ -35,7 +35,8 @@ abstract class TestCase extends BaseTestCase
         );
 
         $this->db->raw(
-            'TRUNCATE ledger_entries, delivery_attempts, deliveries, jobs,
+            'TRUNCATE ledger_entries, delivery_attempts, issued_codes,
+                      provider_discrepancies, deliveries, jobs,
                       payment_events, order_items, orders, provider_stock,
                       provider_settings, products
              RESTART IDENTITY CASCADE'

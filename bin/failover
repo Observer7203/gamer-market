@@ -147,7 +147,10 @@ function emptyStock(Container $c, Connection $db, string $base, string $sku): ar
  */
 function trap(Container $c, Connection $db, string $base, string $sku): array
 {
-    behavior($base, 'a', 'issue_then_timeout', 3);
+    // Полное молчание: код занят, но ни ответа на выдачу, ни состояния.
+    // При обычном таймауте выдача восстановилась бы сразу запросом состояния,
+    // и ловушка не воспроизвелась бы.
+    behavior($base, 'a', 'blackout', 3);
     behavior($base, 'b', 'ok');
 
     $orderId = payFor($c, $base, $sku);

@@ -94,10 +94,27 @@ final class OrderItem
         return $this->status === self::DELIVERED;
     }
 
-    /** Идентификатор запроса к поставщику: детерминирован, общий для повторов. */
-    public function requestId(string $provider): string
+    /**
+     * Идентификатор запроса к поставщику: детерминирован, общий для повторов.
+     *
+     * Поколение отделяет отравленный запрос от нового. Обычно оно равно
+     * единице и не меняется — иначе повтор занял бы у поставщика второй код.
+     * Растёт только когда присланный код отклонён приёмкой как чужой:
+     * прежний запрос будет возвращать его вечно, и нужен другой.
+     */
+    public function requestId(string $provider, int $generation = 1): string
     {
-        return sprintf('req_%s_%d_%s', $this->orderId, $this->position, $provider);
+        return self::requestIdFor($this->orderId, $this->position, $provider, $generation);
+    }
+
+    /** Правило построения идентификатора живёт здесь же, чтобы не разъезжаться. */
+    public static function requestIdFor(
+        string $orderId,
+        int $position,
+        string $provider,
+        int $generation = 1
+    ): string {
+        return sprintf('req_%s_%d_%s_g%d', $orderId, $position, $provider, $generation);
     }
 
     /** @return list<string> состояния, в которых позиция ещё в работе */

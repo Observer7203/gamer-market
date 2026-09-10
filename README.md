@@ -41,16 +41,17 @@ curl http://localhost:8080/health
 docker compose exec app vendor/bin/phpunit
 ```
 
-135 тестов на отдельной базе `gamer_market_test`. Данные разработки
+146 тестов на отдельной базе `gamer_market_test`. Данные разработки
 не затрагиваются.
 
-Проверка exactly-once под конкуренцией, устойчивости интеграций
-и частичной выдачи:
+Проверка exactly-once под конкуренцией, устойчивости интеграций,
+частичной выдачи и поведения при недобросовестном поставщике:
 
 ```bash
 docker compose exec app php bin/race --parallel=50 --repeat=20
 docker compose exec app php bin/failover --repeat=3
 docker compose exec app php bin/partial --repeat=3
+docker compose exec app php bin/dishonest --repeat=3
 ```
 
 Сверка:
@@ -95,7 +96,7 @@ curl http://localhost:8080/api/orders/ord_...
 
 ```
 bin/            точки входа CLI: migrate, seed, worker, heal, reconcile,
-                explain, pay, race, failover, partial
+                explain, pay, race, failover, partial, dishonest
 config/         config.php (единственный читатель окружения), routes.php
 data/           каталог товаров и пул ключей
 docker/         nginx + php-fpm
@@ -142,6 +143,9 @@ tests/
 
 ## Документация
 
+- **[Недобросовестный поставщик](docs/TASK_2.txt)** — приёмка кода вместо
+  доверия ответу, проверка состояния поставщика, автоматический разбор
+  расхождений
 - **[Частичная выдача заказа](docs/TASK_1.txt)** — заказ из нескольких
   позиций: выданное остаётся, за невыданное возвращаются деньги, тождество
   денег, повтор любого шага, доводка после обрыва

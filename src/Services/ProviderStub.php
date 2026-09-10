@@ -9,12 +9,18 @@ use App\Database\Connection;
 /**
  * Заглушка поставщика выдачи.
  *
- * Ключевое требование контракта: повтор с тем же request_id возвращает тот же
- * код. Обеспечивается уникальным индексом на паре (provider, request_id),
+ * Честное поведение: повтор с тем же request_id возвращает тот же код.
+ * Обеспечивается уникальным индексом на паре (provider, request_id),
  * а не проверкой в коде — при конкурентных повторах проверка не гарантирует
  * ничего.
  *
- * Поведение задаётся таблицей provider_settings. Режим random соответствует
+ * Недобросовестное поведение задаётся отдельными режимами: заглушка умеет
+ * выдать один код дважды, прислать чужой код и ответить ошибкой, выдав код
+ * на самом деле. Это не дефекты заглушки, а воспроизводимые сценарии —
+ * защита от них строится на нашей стороне и не должна зависеть от того,
+ * что ответил поставщик.
+ *
+ * Поведение хранится в таблице provider_settings. Режим random соответствует
  * условию «случайно падает и отвечает с задержкой»; остальные режимы делают
  * поведение детерминированным, что требуется для воспроизводимых сценариев.
  */
@@ -26,6 +32,22 @@ final class ProviderStub
     public const TIMEOUT            = 'timeout';
     public const ISSUE_THEN_TIMEOUT = 'issue_then_timeout';
     public const RANDOM             = 'random';
+
+    /** Отдаёт код, уже выданный по другому запросу. Склад при этом не тратится. */
+    public const DUPLICATE_CODE = 'duplicate_code';
+
+    /** Отдаёт код другого поставщика: товар, которым не распоряжается. */
+    public const FOREIGN_CODE = 'foreign_code';
+
+    /** Занимает код и отвечает отказом. Ответ противоречит действительности. */
+    public const ERROR_BUT_ISSUED = 'error_but_issued';
+
+    /**
+     * Полная недоступность: код занят, но поставщик не отвечает ни на выдачу,
+     * ни на запрос состояния. Единственный случай, когда неопределённость
+     * не разрешается сразу — узнать правду больше не у кого.
+     */
+    public const BLACKOUT = 'blackout';
 
     public function __construct(private readonly Connection $db)
     {
@@ -62,12 +84,28 @@ final class ProviderStub
             return ['status' => 'error', 'reason' => 'out_of_stock'];
         }
 
+        if ($mode === self::DUPLICATE_CODE) {
+            return $this->alreadyIssuedCode($provider, $sku);
+        }
+
+        if ($mode === self::FOREIGN_CODE) {
+            return $this->someoneElsesCode($provider, $sku);
+        }
+
+        // Код занят, ответ отрицательный. Ровно тот случай, когда верить
+        // ответу нельзя: отказ говорит, что кода нет, а склад говорит обратное.
+        if ($mode === self::ERROR_BUT_ISSUED) {
+            $this->claimCode($provider, $requestId, $sku);
+
+            return ['status' => 'error', 'reason' => 'provider_unavailable'];
+        }
+
         $result = $this->claimCode($provider, $requestId, $sku);
 
         // Код выдан, ответ не доходит. Ровно та ситуация, ради которой
         // неответ нельзя трактовать как отказ: повтор с тем же request_id
         // обязан вернуть уже выданный код, а не занять второй.
-        if ($mode === self::ISSUE_THEN_TIMEOUT) {
+        if ($mode === self::ISSUE_THEN_TIMEOUT || $mode === self::BLACKOUT) {
             if ($hang) {
                 $this->hang((int) $settings['hang_seconds']);
             }
@@ -76,6 +114,74 @@ final class ProviderStub
         }
 
         return $result;
+    }
+
+    /**
+     * Что поставщик считает выданным по этому запросу.
+     *
+     * Реальные поставщики дают такой метод, и он единственный способ узнать
+     * правду после отказа или молчания: ответу на выдачу верить нельзя,
+     * а состояние на их стороне проверяемо.
+     *
+     * @return array{status: string, code?: string}
+     */
+    public function status(string $provider, string $requestId): array
+    {
+        // При полной недоступности состояние узнать не у кого: именно так
+        // неопределённость и остаётся неразрешённой.
+        if ($this->resolveMode($this->settings($provider)) === self::BLACKOUT) {
+            return ['status' => 'unavailable'];
+        }
+
+        $row = $this->db->selectOne(
+            'SELECT code FROM provider_stock WHERE provider = ? AND request_id = ?',
+            [$provider, $requestId]
+        );
+
+        return $row === null
+            ? ['status' => 'not_issued']
+            : ['status' => 'issued', 'code' => (string) $row['code']];
+    }
+
+    /**
+     * Код, уже выданный по другому запросу.
+     *
+     * Склад не расходуется: поставщик отдаёт одно и то же второй раз,
+     * будучи уверенным, что всё в порядке.
+     *
+     * @return array{status: string, code?: string, reason?: string}
+     */
+    private function alreadyIssuedCode(string $provider, string $sku): array
+    {
+        $row = $this->db->selectOne(
+            'SELECT code FROM provider_stock
+              WHERE provider = ? AND sku = ? AND request_id IS NOT NULL
+              ORDER BY issued_at DESC LIMIT 1',
+            [$provider, $sku]
+        );
+
+        return $row === null
+            ? ['status' => 'error', 'reason' => 'out_of_stock']
+            : ['status' => 'ok', 'code' => (string) $row['code']];
+    }
+
+    /**
+     * Код, которым поставщик не распоряжается: чужой склад.
+     *
+     * @return array{status: string, code?: string, reason?: string}
+     */
+    private function someoneElsesCode(string $provider, string $sku): array
+    {
+        $row = $this->db->selectOne(
+            'SELECT code FROM provider_stock
+              WHERE provider <> ? AND sku = ?
+              ORDER BY issued_at DESC NULLS LAST, id LIMIT 1',
+            [$provider, $sku]
+        );
+
+        return $row === null
+            ? ['status' => 'error', 'reason' => 'out_of_stock']
+            : ['status' => 'ok', 'code' => (string) $row['code']];
     }
 
     /** @return array{status: string, code?: string, reason?: string} */

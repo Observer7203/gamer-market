@@ -40,6 +40,8 @@ $titles = [
     'unapplied_events'      => 'непринятых событий',
     'ledger_imbalanced'     => 'несведённых проводок',
     'unsettled_orders'      => 'завершённых с долгом',
+    'open_discrepancies'    => 'неразобранных расхождений',
+    'unaccepted_codes'      => 'кодов в обход приёмки',
 ];
 
 $pad = static fn (string $text, int $width): string
@@ -68,6 +70,14 @@ foreach ($report['ledger']['balances'] as $account => $amount) {
 }
 printf("  %s %+d\n", $pad('сумма всех счетов', 32), $total);
 
+if ($report['discrepancies'] !== []) {
+    echo "\nРасхождения с поставщиками:\n";
+
+    foreach ($report['discrepancies'] as $kind => $counts) {
+        printf("  %s всего %d, открыто %d\n", $pad($kind, 32), $counts['всего'], $counts['открыто']);
+    }
+}
+
 $sections = [
     'paid_not_delivered'    => 'ОПЛАЧЕН, НО НЕ ВЫДАН',
     'delivered_not_paid'    => 'ВЫДАН, НО НЕ ОПЛАЧЕН',
@@ -76,6 +86,8 @@ $sections = [
     'unapplied_events'      => 'НЕПРИНЯТЫЕ СОБЫТИЯ',
     'ledger_imbalanced'     => 'НЕСВЕДЁННЫЕ ПРОВОДКИ',
     'unsettled_orders'      => 'ЗАВЕРШЁННЫЕ ЗАКАЗЫ С НЕПОГАШЕННЫМ ОБЯЗАТЕЛЬСТВОМ',
+    'open_discrepancies'    => 'НЕРАЗОБРАННЫЕ РАСХОЖДЕНИЯ С ПОСТАВЩИКАМИ',
+    'unaccepted_codes'      => 'КОДЫ, УШЕДШИЕ В ОБХОД ПРИЁМКИ',
 ];
 
 foreach ($sections as $key => $title) {

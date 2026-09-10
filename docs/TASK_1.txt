@@ -35,8 +35,9 @@
                  PRIMARY KEY (order_id, position)
 
 Номер позиции назначается при создании по порядку и больше не меняется.
-На нём построен идентификатор запроса к поставщику, поэтому изменение
-номера означало бы вторую выдачу.
+На нём построен идентификатор запроса к поставщику
+(req_<заказ>_<позиция>_<поставщик>_g<поколение>), поэтому изменение номера
+означало бы вторую выдачу.
 
 Существующие заказы миграция перенесла как позицию номер 1: старые данные
 читаются без исключений.
@@ -341,19 +342,28 @@ obligation равен стоимости незавершённых позици
 6. РУЧНОЙ ПРОГОН: ПОВТОР ЛЮБОГО ШАГА
 ------------------------------------------------------------------------------
 
-Повторная доставка платёжного события с тем же event_id:
+Повторная доставка платёжного события с тем же event_id. Идентификатор
+берётся из базы, а не придумывается: новый id — уже другое событие.
+
+    EVENT=$(docker compose exec -T db psql -U gamer -d gamer_market -tA -c \
+      "SELECT event_id FROM payment_events
+        WHERE order_id = '$ORDER' AND outcome = 'applied';")
 
     curl -s -X POST http://localhost:8080/api/webhooks/payment \
       -H 'Content-Type: application/json' \
-      -d "{\"event_id\":\"evt_ЛЮБОЙ_УЖЕ_ОТПРАВЛЕННЫЙ\",\"order_id\":\"$ORDER\",
+      -d "{\"event_id\":\"$EVENT\",\"order_id\":\"$ORDER\",
            \"status\":\"paid\",\"amount\":4480,\"currency\":\"RUB\",
            \"created_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
 
 Ответ duplicate, число строк в журнале не изменилось.
 
+С новым event_id ответ будет ignored: событие принято, но заказ уже
+в конечном состоянии, перехода в paid из него нет. Исход другой, итог
+тот же — денег второй раз не приняли.
+
 Повторная выдача и повторный возврат по каждой позиции:
 
-    docker compose exec app php -r '
+    docker compose exec -e ORDER=$ORDER app php -r '
       $c = require "/app/src/bootstrap.php";
       $order = getenv("ORDER");
       foreach ([1, 2, 3] as $p) {
@@ -417,7 +427,7 @@ obligation равен стоимости незавершённых позици
 
 Попытка вернуть деньги напрямую:
 
-    docker compose exec app php -r '
+    docker compose exec -e ORDER=$ORDER app php -r '
       $c = require "/app/src/bootstrap.php";
       var_dump(($c->get(App\Services\RefundItem::class))(getenv("ORDER"), 1));'
 
