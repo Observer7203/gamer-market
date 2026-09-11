@@ -415,6 +415,113 @@ paths:
               schema:
                 $ref: "#/components/schemas/QueueProgress"
 
+  /api/admin/history/orders/{id}:
+    get:
+      operationId: getOrderStateAt
+      tags: [Служебные]
+      summary: Состояние заказа на момент
+      description: |
+        Текущее состояние заказа перезаписывается при каждом изменении,
+        поэтому вопрос «что было тогда» адресуется журналу событий.
+
+        Момент задаётся включительно: событие, случившееся ровно в указанное
+        время, в состояние входит. Доли секунды учитываются — внутри одной
+        секунды заказ успевает пройти несколько состояний.
+
+        Код позиции показывается, только если он был принят к тому моменту:
+        выданное позже вчерашним числом не показывается.
+
+        Без параметра `at` отдаётся текущая картина.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          example: ord_01M1V74GDR7FW5KKQYYK30X2RC
+        - name: at
+          in: query
+          required: false
+          schema:
+            type: string
+          example: "2026-09-10T12:00:00Z"
+      responses:
+        "200":
+          description: Состояние на указанный момент
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrderStateAt"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "404":
+          description: На указанный момент заказа ещё не существовало
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/admin/history/money:
+    get:
+      operationId: getMoneyAt
+      tags: [Служебные]
+      summary: Деньги на момент
+      description: |
+        Остаток на момент — сумма движений журнала до этого момента.
+        Отдельной истории для денег не требуется: журнал проводок изначально
+        ведётся дополнением.
+      parameters:
+        - name: at
+          in: query
+          required: false
+          schema:
+            type: string
+          example: "2026-09-10T12:00:00Z"
+      responses:
+        "200":
+          description: Деньги на указанный момент
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MoneyIdentity"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+
+  /api/admin/history/period:
+    get:
+      operationId: getPeriodTotals
+      tags: [Служебные]
+      summary: Итоги за период
+      description: |
+        Остаток на конец обязан равняться остатку на начало плюс движения
+        за период. Если равенство не выполняется, значит в журнал вмешались
+        задним числом — а вмешаться в него нельзя.
+
+        Граница периода принадлежит ему включительно, поэтому сумма итогов
+        двух смежных периодов равна итогу целого.
+      parameters:
+        - name: from
+          in: query
+          required: true
+          schema:
+            type: string
+          example: "2026-09-10T00:00:00Z"
+        - name: to
+          in: query
+          required: true
+          schema:
+            type: string
+          example: "2026-09-11T00:00:00Z"
+      responses:
+        "200":
+          description: Итоги за период
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PeriodTotals"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+
   /stubs/provider-{provider}/issue:
     post:
       operationId: stubIssue
@@ -772,6 +879,87 @@ components:
             Время возникновения события у платёжной системы. Задаёт порядок
             применения, не связанный с порядком доставки.
           example: "2026-01-01T12:00:00Z"
+
+    MoneyIdentity:
+      type: object
+      description: |
+        Тождество денег: каждый принятый рубль отработан выдачей, возвращён
+        покупателю либо составляет обязательство по незавершённым позициям.
+      properties:
+        paid: {type: integer}
+        delivered: {type: integer}
+        refunded: {type: integer}
+        in_progress: {type: integer}
+        balanced:
+          type: boolean
+          description: Выполняется ли оплачено = выдано + возвращено + в работе
+        identity: {type: string}
+
+    OrderStateAt:
+      type: object
+      properties:
+        order_id: {type: string}
+        at:
+          type: string
+          description: Момент, на который восстановлено состояние
+        status: {type: string}
+        amount: {type: integer}
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              position: {type: integer}
+              status: {type: string}
+              amount: {type: integer}
+              changed_at: {type: string}
+              code:
+                type: string
+                nullable: true
+                description: Присутствует, только если код был принят к тому моменту
+        money:
+          $ref: "#/components/schemas/MoneyIdentity"
+        timeline:
+          type: array
+          description: События заказа до указанного момента, по порядку
+          items:
+            type: object
+            properties:
+              position:
+                type: integer
+                nullable: true
+                description: NULL означает событие заказа целиком
+              from_status:
+                type: string
+                nullable: true
+              to_status: {type: string}
+              amount_minor: {type: integer}
+              occurred_at: {type: string}
+
+    PeriodTotals:
+      type: object
+      properties:
+        from: {type: string}
+        to: {type: string}
+        orders:
+          type: object
+          properties:
+            created: {type: integer}
+            paid: {type: integer}
+            items_delivered: {type: integer}
+            items_refunded: {type: integer}
+        opening:
+          $ref: "#/components/schemas/MoneyIdentity"
+        movement:
+          $ref: "#/components/schemas/MoneyIdentity"
+        closing:
+          $ref: "#/components/schemas/MoneyIdentity"
+        movement_balanced:
+          type: boolean
+          description: Движения за период сами по себе дают в сумме ноль
+        consistent:
+          type: boolean
+          description: Остаток на конец равен остатку на начало плюс движения
 
     QueueProgress:
       type: object

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use App\Controllers\CatalogController;
 use App\Controllers\HealthController;
+use App\Controllers\HistoryController;
 use App\Controllers\OrderController;
 use App\Controllers\PaymentWebhookController;
 use App\Controllers\QueueController;
@@ -32,6 +33,11 @@ return static function (Router $router): void {
     // Прогресс очереди под нагрузкой: сколько ждёт, сколько выдано,
     // сколько места осталось в лимите поставщиков.
     $router->get('/api/admin/queue', [QueueController::class, 'show']);
+
+    // Картина на прошлый момент: состояние заказа, деньги, итоги за период.
+    $router->get('/api/admin/history/orders/{id}', [HistoryController::class, 'order']);
+    $router->get('/api/admin/history/money', [HistoryController::class, 'money']);
+    $router->get('/api/admin/history/period', [HistoryController::class, 'period']);
 
     // Заглушка поставщика: отдельный сервис, размещённый в том же приложении
     // ради простоты запуска.

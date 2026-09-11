@@ -18,6 +18,9 @@ use App\Database\Connection;
  *
  *     оплачено = выдано + возвращено + ещё в работе
  *
+ * Четвёртый — совпадает ли текущее состояние с воспроизведённым по истории.
+ * Расхождение означает изменение в обход журнала событий.
+ *
  * Остальные разделы показывают состояния, из которых система не вышла
  * самостоятельно: зависшие задачи, неразрешённые обращения к поставщику,
  * непринятые платёжные события.
@@ -31,6 +34,7 @@ final class Reconciliation
         private readonly Connection $db,
         private readonly Ledger $ledger,
         private readonly Discrepancies $discrepancies,
+        private readonly TemporalState $history,
     ) {
     }
 
@@ -47,11 +51,13 @@ final class Reconciliation
         $money            = $this->money();
         $openDiscrepancies = $this->discrepancies->open();
         $unacceptedCodes  = $this->unacceptedCodes();
+        $historyMismatches = $this->history->mismatches();
 
         $problems = count($paidNotDelivered) + count($deliveredNotPaid)
             + count($stuckJobs) + count($unresolved)
             + count($unappliedEvents) + count($imbalanced) + count($unsettled)
             + count($openDiscrepancies) + count($unacceptedCodes)
+            + count($historyMismatches)
             + ($money['balanced'] ? 0 : 1);
 
         return [
@@ -74,6 +80,7 @@ final class Reconciliation
                 'unsettled_orders'      => count($unsettled),
                 'open_discrepancies'    => count($openDiscrepancies),
                 'unaccepted_codes'      => count($unacceptedCodes),
+                'history_mismatches'    => count($historyMismatches),
             ],
 
             'discrepancies' => $this->discrepancies->summary(),
@@ -90,6 +97,7 @@ final class Reconciliation
             'unsettled_orders'      => $unsettled,
             'open_discrepancies'    => $openDiscrepancies,
             'unaccepted_codes'      => $unacceptedCodes,
+            'history_mismatches'    => $historyMismatches,
         ];
     }
 

@@ -42,6 +42,7 @@ $titles = [
     'unsettled_orders'      => 'завершённых с долгом',
     'open_discrepancies'    => 'неразобранных расхождений',
     'unaccepted_codes'      => 'кодов в обход приёмки',
+    'history_mismatches'    => 'расхождений с историей',
 ];
 
 $pad = static fn (string $text, int $width): string
@@ -88,6 +89,7 @@ $sections = [
     'unsettled_orders'      => 'ЗАВЕРШЁННЫЕ ЗАКАЗЫ С НЕПОГАШЕННЫМ ОБЯЗАТЕЛЬСТВОМ',
     'open_discrepancies'    => 'НЕРАЗОБРАННЫЕ РАСХОЖДЕНИЯ С ПОСТАВЩИКАМИ',
     'unaccepted_codes'      => 'КОДЫ, УШЕДШИЕ В ОБХОД ПРИЁМКИ',
+    'history_mismatches'    => 'СОСТОЯНИЕ РАСХОДИТСЯ С ИСТОРИЕЙ',
 ];
 
 foreach ($sections as $key => $title) {

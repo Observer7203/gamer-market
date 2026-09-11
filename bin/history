@@ -1,0 +1,173 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+use App\Services\TemporalState;
+use App\Support\Container;
+use App\Support\Money;
+
+/**
+ * Картина на прошлый момент: состояние заказа, деньги, итоги за период.
+ *
+ *   php bin/history --order=ord_... --at='2026-09-10 12:00:00'
+ *   php bin/history --money --at='2026-09-10 12:00:00'
+ *   php bin/history --period --from='2026-09-10' --to='2026-09-11'
+ *   php bin/history --order=ord_... --timeline
+ */
+
+/** @var Container $container */
+$container = require dirname(__DIR__) . '/src/bootstrap.php';
+$state = $container->get(TemporalState::class);
+
+$options = getopt('', ['order::', 'at::', 'money', 'period', 'from::', 'to::', 'timeline', 'json']);
+
+$at = moment($options['at'] ?? null) ?? moment('now');
+$json = isset($options['json']);
+
+$pad = static fn (string $text, int $width): string
+    => $text . str_repeat(' ', max(1, $width - mb_strlen($text)));
+
+if (isset($options['period'])) {
+    $from = moment($options['from'] ?? null);
+    $to = moment($options['to'] ?? null) ?? moment('now');
+
+    if ($from === null) {
+        fwrite(STDERR, "Укажите начало периода: --from='2026-09-10'\n");
+        exit(2);
+    }
+
+    $totals = $state->periodTotals($from, $to);
+
+    if ($json) {
+        echo json_encode($totals, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), "\n";
+        exit($totals['consistent'] ? 0 : 1);
+    }
+
+    printf("Итоги за период\n  с %s\n  по %s\n\n", $totals['from'], $totals['to']);
+
+    printf("  %s %d\n", $pad('заказов создано', 28), $totals['orders']['created']);
+    printf("  %s %d\n", $pad('заказов оплачено', 28), $totals['orders']['paid']);
+    printf("  %s %d\n", $pad('позиций выдано', 28), $totals['orders']['items_delivered']);
+    printf("  %s %d\n", $pad('позиций возвращено', 28), $totals['orders']['items_refunded']);
+
+    foreach (['opening' => 'на начало', 'movement' => 'за период', 'closing' => 'на конец'] as $key => $title) {
+        printf("\n%s:\n", ucfirst($title));
+        money($totals[$key], $pad);
+    }
+
+    printf(
+        "\n  %s %s\n",
+        $pad('остаток на конец = на начало + движения', 44),
+        $totals['consistent'] ? 'да' : 'НЕТ',
+    );
+    printf("  %s %s\n", $pad('движения за период сбалансированы', 44),
+        $totals['movement_balanced'] ? 'да' : 'НЕТ');
+
+    exit($totals['consistent'] && $totals['movement_balanced'] ? 0 : 1);
+}
+
+if (isset($options['money'])) {
+    $snapshot = $state->moneyAt($at);
+
+    if ($json) {
+        echo json_encode($snapshot, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE), "\n";
+        exit(0);
+    }
+
+    printf("Деньги на %s\n\n", $at);
+    money($snapshot, $pad);
+    exit(0);
+}
+
+$orderId = $options['order'] ?? null;
+
+if (!is_string($orderId) || $orderId === '') {
+    fwrite(STDERR, "Укажите заказ: --order=ord_...\n  либо --money, либо --period\n");
+    exit(2);
+}
+
+if (isset($options['timeline'])) {
+    $events = $state->timeline($orderId);
+
+    if ($events === []) {
+        fwrite(STDERR, "По заказу нет событий\n");
+        exit(2);
+    }
+
+    printf("История заказа %s\n\n", $orderId);
+
+    foreach ($events as $event) {
+        printf(
+            "  %s  %s  %s -> %s\n",
+            substr((string) $event['occurred_at'], 0, 19),
+            $event['position'] === null ? 'заказ    ' : sprintf('позиция %d', $event['position']),
+            $pad((string) ($event['from_status'] ?? '—'), 12),
+            (string) $event['to_status'],
+        );
+    }
+
+    exit(0);
+}
+
+$snapshot = $state->orderAt($orderId, $at);
+
+if ($snapshot === null) {
+    fwrite(STDERR, "На $at заказа ещё не существовало\n");
+    exit(2);
+}
+
+if ($json) {
+    echo json_encode($snapshot, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE), "\n";
+    exit(0);
+}
+
+printf("Заказ %s на %s\n\n", $snapshot['order_id'], $snapshot['at']);
+printf("  %s %s\n", $pad('состояние', 28), $snapshot['status']);
+printf("  %s %s\n", $pad('сумма', 28), Money::toContract($snapshot['amount_minor']));
+printf("  %s %s\n", $pad('изменено', 28), substr($snapshot['changed_at'], 0, 19));
+
+echo "\nПозиции:\n";
+
+foreach ($snapshot['items'] as $item) {
+    printf(
+        "  %d  %s %s %s\n",
+        $item['position'],
+        $pad($item['status'], 14),
+        $pad((string) Money::toContract($item['amount_minor']), 8),
+        $item['code'] ?? '',
+    );
+}
+
+echo "\nДеньги по заказу:\n";
+money($snapshot['money'], $pad);
+
+/** @param array<string, mixed> $money */
+function money(array $money, callable $pad): void
+{
+    printf("  %s %d\n", $pad('оплачено', 28), $money['paid_minor']);
+    printf("  %s %d\n", $pad('выдано', 28), $money['delivered_minor']);
+    printf("  %s %d\n", $pad('возвращено', 28), $money['refunded_minor']);
+    printf("  %s %d\n", $pad('в работе', 28), $money['in_progress_minor']);
+    printf("  %s %s\n", $pad('сходится', 28), $money['balanced'] ? 'да' : 'НЕТ');
+}
+
+/**
+ * Разбор момента с сохранением долей секунды.
+ *
+ * gmdate округляет до секунды, а события внутри секунды различимы: заказ
+ * успевает пройти несколько состояний. Округление сдвинуло бы границу
+ * и показало картину не того момента.
+ */
+function moment(?string $value): ?string
+{
+    if ($value === null || $value === '') {
+        return null;
+    }
+
+    try {
+        return (new DateTimeImmutable($value))->format('Y-m-d\TH:i:s.uP');
+    } catch (Exception) {
+        return null;
+    }
+}

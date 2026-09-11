@@ -41,7 +41,7 @@ curl http://localhost:8080/health
 docker compose exec app vendor/bin/phpunit
 ```
 
-155 тестов на отдельной базе `gamer_market_test`. Данные разработки
+175 тестов на отдельной базе `gamer_market_test`. Данные разработки
 не затрагиваются.
 
 Проверка exactly-once под конкуренцией, устойчивости интеграций, частичной
@@ -60,6 +60,14 @@ docker compose exec app php bin/surge
 ```bash
 docker compose exec app php bin/queue --watch
 curl -s http://localhost:8080/api/admin/queue
+```
+
+Картина на прошлый момент и итоги за период:
+
+```bash
+docker compose exec app php bin/history --order=ord_... --timeline
+docker compose exec app php bin/history --order=ord_... --at='2026-09-10 12:00:00'
+docker compose exec app php bin/history --period --from='2026-09-10' --to='2026-09-11'
 ```
 
 Сверка:
@@ -105,7 +113,7 @@ curl http://localhost:8080/api/orders/ord_...
 ```
 bin/            точки входа CLI: migrate, seed, worker, heal, reconcile,
                 explain, pay, race, failover, partial, dishonest,
-                surge, queue
+                surge, queue, history
 config/         config.php (единственный читатель окружения), routes.php
 data/           каталог товаров и пул ключей
 docker/         nginx + php-fpm
@@ -152,6 +160,9 @@ tests/
 
 ## Документация
 
+- **[Картина на прошлый момент](docs/TASK_4.txt)** — журнал состояний,
+  который пишет база и нельзя переписать; состояние заказа и денег на любое
+  время, итоги за период
 - **[Всплеск и лимит поставщика](docs/TASK_3.txt)** — скользящее окно,
   отложенная работа вместо проваленной, приоритет оплаченных, видимый прогресс
 - **[Недобросовестный поставщик](docs/TASK_2.txt)** — приёмка кода вместо

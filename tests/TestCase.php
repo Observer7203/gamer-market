@@ -38,8 +38,8 @@ abstract class TestCase extends BaseTestCase
         $this->db->raw(
             'TRUNCATE ledger_entries, delivery_attempts, issued_codes,
                       provider_discrepancies, deliveries, jobs, provider_calls,
-                      payment_events, order_items, orders, provider_stock,
-                      provider_settings, products
+                      order_events, payment_events, order_items, orders,
+                      provider_stock, provider_settings, products
              RESTART IDENTITY CASCADE'
         );
 
